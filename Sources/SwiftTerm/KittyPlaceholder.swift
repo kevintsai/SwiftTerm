@@ -107,7 +107,12 @@ enum KittyPlaceholderDecoder {
         case .ansi256(let code):
             return UInt32(code)
         case .trueColor(let red, let green, let blue):
-            return UInt32(red) | (UInt32(green) << 8) | (UInt32(blue) << 16)
+            // The image id is the numeric color value 0xRRGGBB (red = most
+            // significant byte), matching kitty's reference encoding and the
+            // plain integer id stored from the `i=` transmit key. Reversing the
+            // bytes here made virtualPlacementsByImageId lookups miss, so images
+            // from unicode-placeholder producers never composited.
+            return (UInt32(red) << 16) | (UInt32(green) << 8) | UInt32(blue)
         case .defaultColor, .defaultInvertedColor:
             return 0
         }
