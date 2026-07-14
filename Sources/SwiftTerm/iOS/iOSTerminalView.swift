@@ -1281,6 +1281,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
     public var useBrightColors: Bool = true
 
+    /// When false, bold text no longer promotes ANSI colors 0-6 to their bright variants (mirrors kitty's
+    /// `bold_is_bright no`); explicit bright color codes still render bright. Independent of `useBrightColors`.
+    /// Default true preserves the historical behavior. Takes effect on the next redraw.
+    public var boldIsBright: Bool = true {
+        didSet { colorsChanged () }
+    }
+
     /// When true, block element (U+2580-U+259F) and box drawing (U+2500-U+257F) characters use custom rendering.
     public var customBlockGlyphs: Bool = true {
         didSet {
