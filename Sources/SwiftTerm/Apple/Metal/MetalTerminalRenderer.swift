@@ -781,7 +781,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return buildDrawData(scale: scale)
         }
         atlasResetHandled = false
-        if imgDbg {
+        if imgDbg && imgDbgPlaceholders > 0 {
             let kg = terminalView.terminal.kittyGraphicsState
             let placedDraws = frameData?.placeholderImageDraws.count
             print("[metal-img] mode=\(bufferingMode) altBuffer=\(isAltBuffer) "
@@ -2321,7 +2321,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let texture: MTLTexture?
         switch kittyImage.payload {
         case .png(let data):
-            texture = try? textureLoader.newTexture(data: data, options: textureOptions())
+            // MTKTextureLoader.newTexture(data:) rejects PNG subtypes its internal
+            // decoder can't handle — notably 8-bit palette/indexed PNGs, which is
+            // exactly what PlantUML (hence mdview) emits, so kitty virtual-placement
+            // images silently failed to appear under Metal. Fall back to decoding via
+            // ImageIO and normalizing to a straight RGBA8 CGImage, which the loader
+            // accepts; keep the same options so orientation matches the direct path.
+            texture = (try? textureLoader.newTexture(data: data, options: textureOptions()))
+                ?? pngTextureViaCGImage(data: data)
         case .rgba(let bytes, let width, let height):
             texture = textureFromRGBA(bytes: bytes, width: width, height: height)
         }
@@ -2336,6 +2343,31 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #endif
         }
         return texture
+    }
+
+    /// Decode a PNG that MTKTextureLoader.newTexture(data:) rejected (e.g. 8-bit
+    /// palette PNGs from PlantUML/mdview) by going through ImageIO and redrawing
+    /// into a straight premultiplied-RGBA8 CGImage the loader accepts. Uses the
+    /// same textureOptions() so bottom-left origin handling matches the direct path.
+    private func pngTextureViaCGImage(data: Data) -> MTLTexture? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        let width = decoded.width, height = decoded.height
+        guard width > 0, height > 0,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        context.draw(decoded, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let rgba = context.makeImage() else {
+            return nil
+        }
+        return try? textureLoader.newTexture(cgImage: rgba, options: textureOptions())
     }
 
     private func kittySignature(for payload: KittyGraphicsPayload) -> KittyImageSignature {
