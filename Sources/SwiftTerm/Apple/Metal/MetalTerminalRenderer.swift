@@ -383,6 +383,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             os_signpost(.begin, log: MetalTerminalRenderer.profileLog, name: "Metal.BuildDrawData", signpostID: buildID)
         }
 #endif
+        let benchT0 = terminalView.renderBenchEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         let drawData = buildDrawData(scale: scale)
 #if canImport(os)
         if MetalTerminalRenderer.profileEnabled {
@@ -541,6 +542,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         commandBuffer.present(drawable)
         bufferPool.commit(commandBuffer: commandBuffer)
         commandBuffer.commit()
+        if terminalView.renderBenchEnabled {
+            terminalView.renderBenchRecord(DispatchTime.now().uptimeNanoseconds - benchT0)
+        }
 #if canImport(os)
         if MetalTerminalRenderer.profileEnabled {
             os_signpost(.end, log: MetalTerminalRenderer.profileLog, name: "Metal.Commit", signpostID: commitID)

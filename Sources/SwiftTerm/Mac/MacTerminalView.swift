@@ -222,6 +222,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// not to be fully solvable at this layer (even kitty shows it), so it ships
     /// off and upstream behavior is the default; kept as an A/B knob. See ADR 0017.
     public var coalesceBurstRedraws: Bool = false
+
+    // Opt-in per-frame paint timing for benchmarking (fleetmux ADR 0017). Both the
+    // CoreGraphics paint and the Metal draw accumulate their CPU time here so the
+    // two renderers can be compared on the same corpus. Nanoseconds.
+    public var renderBenchEnabled = false
+    public private(set) var renderBenchFrames = 0
+    public private(set) var renderBenchTotalNs: UInt64 = 0
+    public private(set) var renderBenchMaxNs: UInt64 = 0
+    public func renderBenchReset() { renderBenchFrames = 0; renderBenchTotalNs = 0; renderBenchMaxNs = 0 }
+    func renderBenchRecord(_ ns: UInt64) {
+        renderBenchFrames += 1
+        renderBenchTotalNs += ns
+        if ns > renderBenchMaxNs { renderBenchMaxNs = ns }
+    }
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
@@ -953,7 +967,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         guard let currentContext = getCurrentGraphicsContext() else {
             return
         }
+        let benchT0 = renderBenchEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         drawTerminalContents (dirtyRect: dirtyRect, context: currentContext, bufferOffset: terminal.displayBuffer.yDisp)
+        if renderBenchEnabled {
+            renderBenchRecord(DispatchTime.now().uptimeNanoseconds - benchT0)
+        }
     }
     
     public override func cursorUpdate(with event: NSEvent)
