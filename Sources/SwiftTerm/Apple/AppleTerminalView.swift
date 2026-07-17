@@ -2140,37 +2140,47 @@ extension TerminalView {
     func feedFinish ()
     {
         suspendDisplayUpdates ()
-        if shouldDisplayImmediatelyAfterUserInput() {
+        if takeImmediateDisplayGrantAfterUserInput() {
             displayImmediately()
             return
         }
         queuePendingDisplay()
     }
 
-    private func shouldDisplayImmediatelyAfterUserInput() -> Bool {
+    /// Decides whether this feed chunk should bypass the 16.67ms throttle because
+    /// it closely follows a user input (echo / prompt redraw), and — under the
+    /// default `coalesceBurstRedraws` policy — consumes a one-shot grant so that
+    /// only the *first* chunk after each input paints immediately. Later chunks in
+    /// the same burst fall back to the throttled path, which is what collapses a
+    /// program's multi-chunk full-screen redraw (and its transient blank
+    /// mid-frames, e.g. while holding Enter under tmux) into coalesced 60fps
+    /// updates. The whole check runs under userInputLock so the window test and
+    /// the grant consumption are atomic against a concurrent recordUserInput().
+    private func takeImmediateDisplayGrantAfterUserInput() -> Bool {
         guard !terminal.synchronizedOutputActive else { return false }
-        let last = loadLastUserInputUptimeNs()
+        userInputLock.lock()
+        defer { userInputLock.unlock() }
+        let last = lastUserInputUptimeNs
         guard last > 0 else { return false }
         let now = DispatchTime.now().uptimeNanoseconds
-        guard now >= last else { return false }
-        return now - last <= interactiveInputDisplayWindowNs
+        guard now >= last, now - last <= interactiveInputDisplayWindowNs else { return false }
+        if coalesceBurstRedraws {
+            guard immediateEchoPending else { return false }
+            immediateEchoPending = false
+        }
+        return true
     }
 
     /// Records that the user just produced input, opening the immediate-display
-    /// window. `lastUserInputUptimeNs` is written here on the main thread but
-    /// read from the (possibly background) feed thread in feedFinish(), so both
-    /// accesses go through userInputLock to avoid a data race / torn read.
+    /// window and arming a one-shot immediate-echo grant. Written on the main
+    /// thread but read from the (possibly background) feed thread in feedFinish(),
+    /// so both accesses go through userInputLock to avoid a data race / torn read.
     func recordUserInput() {
         let now = DispatchTime.now().uptimeNanoseconds
         userInputLock.lock()
         lastUserInputUptimeNs = now
+        immediateEchoPending = true
         userInputLock.unlock()
-    }
-
-    private func loadLastUserInputUptimeNs() -> UInt64 {
-        userInputLock.lock()
-        defer { userInputLock.unlock() }
-        return lastUserInputUptimeNs
     }
 
     private func displayImmediately() {

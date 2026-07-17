@@ -198,6 +198,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// read from the (possibly background) feed thread.
     let userInputLock = NSLock()
     let interactiveInputDisplayWindowNs: UInt64 = 150_000_000
+    /// One-shot grant armed by each user input and consumed by the first feed
+    /// chunk that follows. Guarded by userInputLock. See `coalesceBurstRedraws`.
+    var immediateEchoPending: Bool = false
+    /// When true (default), only the first feed chunk after a user input paints
+    /// immediately; subsequent chunks in the same burst fall back to the 16.67ms
+    /// throttle. This collapses a program's multi-chunk full-screen redraw (e.g.
+    /// tmux repainting while you hold Enter) — whose intermediate chunks show a
+    /// scrolled-but-not-yet-repainted blank mid-frame — into coalesced 60fps
+    /// updates, while keeping single-keystroke echo instant. Set false to restore
+    /// the prior "every chunk within the input window paints immediately" behavior.
+    public var coalesceBurstRedraws: Bool = true
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
