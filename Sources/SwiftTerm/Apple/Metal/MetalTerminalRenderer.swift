@@ -223,6 +223,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var imageTextureFailures: Set<ObjectIdentifier> = []
     private var kittyTextureFailures: Set<UInt32> = []
 #endif
+    // Opt-in kitty-image diagnostics (SWIFTTERM_METAL_IMG_DEBUG=1). Bisects why a
+    // virtual-placement image fails to show under the Metal path: per build it
+    // reports placement records collected vs placeholders seen vs textures made vs
+    // draws actually appended, so the failing stage is unambiguous. See fleetmux ADR 0017.
+    let imgDbg = ProcessInfo.processInfo.environment["SWIFTTERM_METAL_IMG_DEBUG"] == "1"
+    var imgDbgPlaceholders = 0
+    var imgDbgNoRecord = 0
+    var imgDbgNoTexture = 0
+    var imgDbgEmptyVisible = 0
+    var imgDbgDrawn = 0
 
     init(view: MTKView, terminalView: TerminalView) throws {
         guard let device = view.device ?? MTLCreateSystemDefaultDevice() else {
@@ -650,6 +660,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 virtualPlacementsByImageId[record.imageId, default: []].append(record)
             }
         }
+        if imgDbg {
+            imgDbgPlaceholders = 0; imgDbgNoRecord = 0; imgDbgNoTexture = 0
+            imgDbgEmptyVisible = 0; imgDbgDrawn = 0
+        }
 
         var rebuiltRows = 0
         var cachedRows = 0
@@ -767,6 +781,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return buildDrawData(scale: scale)
         }
         atlasResetHandled = false
+        if imgDbg {
+            let kg = terminalView.terminal.kittyGraphicsState
+            let placedDraws = frameData?.placeholderImageDraws.count
+            print("[metal-img] mode=\(bufferingMode) altBuffer=\(isAltBuffer) "
+                + "store(images=\(kg.imagesById.count) placements=\(kg.placementsByKey.count)) "
+                + "virtualPlacementsById=\(virtualPlacementsByImageId.count) "
+                + "placeholdersSeen=\(imgDbgPlaceholders) noRecord=\(imgDbgNoRecord) "
+                + "noTexture=\(imgDbgNoTexture) emptyVisible=\(imgDbgEmptyVisible) drawn=\(imgDbgDrawn)"
+                + (placedDraws.map { " frameDraws=\($0)" } ?? ""))
+        }
         return result
     }
 
@@ -1330,7 +1354,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
         if !lineInfo.kittyPlaceholders.isEmpty {
             for placeholder in lineInfo.kittyPlaceholders {
+                if imgDbg { imgDbgPlaceholders += 1 }
                 guard let records = virtualPlacementsByImageId[placeholder.imageId] else {
+                    if imgDbg { imgDbgNoRecord += 1 }
                     continue
                 }
                 guard let record = records.first(where: { record in
@@ -1342,9 +1368,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                         record.cols > 0 &&
                         record.rows > 0
                 }) else {
+                    if imgDbg { imgDbgNoRecord += 1 }
                     continue
                 }
                 guard let texture = kittyTexture(imageId: placeholder.imageId) else {
+                    if imgDbg { imgDbgNoTexture += 1 }
                     continue
                 }
 
@@ -1369,6 +1397,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                       height: cellHeight)
                 let visible = imageRect.intersection(cellRect)
                 if visible.isEmpty {
+                    if imgDbg { imgDbgEmptyVisible += 1 }
                     continue
                 }
                 let u0 = (visible.minX - imageRect.minX) / imageRect.width
@@ -1383,6 +1412,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                         clipRect: clipRect,
                                         pivotY: pivotY,
                                         scale: scale) {
+                    if imgDbg { imgDbgDrawn += 1 }
                     placeholderImageDraws.append(draw)
                 }
             }
