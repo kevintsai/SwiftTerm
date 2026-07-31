@@ -296,6 +296,71 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     var _lineSpacing: CGFloat = 1.0
     public var terminal: Terminal!
 
+    // MARK: Cursor trail (kitty-style motion trail; see MacCursorTrailView)
+
+    private var cursorTrailView: CursorTrailView?
+
+    /// Enables the cursor "motion trail" overlay (a faithful port of kitty's `cursor_trail`).
+    /// CoreGraphics render path only. Installing/removing the overlay is lazy.
+    public var cursorTrailEnabled: Bool = false {
+        didSet {
+            guard cursorTrailEnabled != oldValue else { return }
+            updateCursorTrailInstall()
+        }
+    }
+    /// kitty `cursor_trail_decay` first value (seconds): decay of the leading corners.
+    public var cursorTrailDecayFast: Double = 0.1 {
+        didSet { cursorTrailView?.decayFast = CGFloat(cursorTrailDecayFast) }
+    }
+    /// kitty `cursor_trail_decay` second value (seconds): decay of the trailing corners.
+    public var cursorTrailDecaySlow: Double = 0.4 {
+        didSet { cursorTrailView?.decaySlow = CGFloat(cursorTrailDecaySlow) }
+    }
+    /// kitty `cursor_trail_start_threshold` (cells): moves smaller than this snap without a trail.
+    public var cursorTrailStartThreshold: Int = 2 {
+        didSet { cursorTrailView?.startThreshold = cursorTrailStartThreshold }
+    }
+
+    /// The cursor style restored on `DECSCUSR 0` (reset to default) — kitty's `cursor_shape`. Applications
+    /// still drive the cursor via DECSCUSR (nvim can request a blink), but "reset" returns here instead of
+    /// the xterm blinking-block default. Set the initial/visible style separately with `getTerminal().setCursorStyle(_:)`.
+    public var defaultCursorStyle: CursorStyle? {
+        get { terminal?.defaultCursorStyle }
+        set { terminal?.defaultCursorStyle = newValue }
+    }
+
+    private func updateCursorTrailInstall() {
+        if cursorTrailEnabled {
+            guard cursorTrailView == nil else { return }
+            let v = CursorTrailView(frame: bounds)
+            v.autoresizingMask = [.width, .height]
+            v.terminalView = self
+            v.decayFast = CGFloat(cursorTrailDecayFast)
+            v.decaySlow = CGFloat(cursorTrailDecaySlow)
+            v.startThreshold = cursorTrailStartThreshold
+            // Below the caret so the opaque block always covers the trail's leading edge.
+            if let caretView, caretView.superview == self {
+                addSubview(v, positioned: .below, relativeTo: caretView)
+            } else {
+                addSubview(v)
+            }
+            cursorTrailView = v
+        } else {
+            cursorTrailView?.stopAndRemove()
+            cursorTrailView = nil
+        }
+    }
+
+    /// Feed the trail overlay the latest caret geometry. Called from `updateCursorPosition()`.
+    func notifyCursorTrail(visible: Bool) {
+        guard let cursorTrailView, let caretView, let cellDimension else { return }
+        cursorTrailView.cursorMoved(
+            rect: caretView.frame,
+            cellWidth: cellDimension.width,
+            cellHeight: cellDimension.height,
+            visible: visible)
+    }
+
     /// Marked (uncommitted) text from an input source (IME, dictation, etc.).
     private var markedTextStorage: NSAttributedString?
     private var markedSelectedRange: NSRange = NSRange(location: NSNotFound, length: 0)

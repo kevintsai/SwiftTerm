@@ -1867,6 +1867,9 @@ extension TerminalView {
         
         if vy >= buffer.yDisp + buffer.rows {
             caretView.removeFromSuperview()
+            #if os(macOS)
+            notifyCursorTrail(visible: false)
+            #endif
             return
         } else if terminal.cursorHidden == false && caretView.superview != self {
             addSubview(caretView)
@@ -1888,6 +1891,9 @@ extension TerminalView {
         caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
         caretView.frame.size.width = cellDimension.width * doublePosition * CGFloat(cursorColumnWidth)
         caretView.setText (ch: charUnderCursor)
+        #if os(macOS)
+        notifyCursorTrail(visible: caretView.superview == self)
+        #endif
     }
     
     // Does not use a default argument and merge, because it is called back

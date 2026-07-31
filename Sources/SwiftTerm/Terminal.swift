@@ -3229,6 +3229,12 @@ open class Terminal {
             options.cursorStyle = style
         }
     }
+
+    /// The cursor style a `DECSCUSR 0` ("reset to the terminal default") should restore, when set.
+    /// This is the terminal equivalent of kitty's `cursor_shape`: applications freely change the cursor
+    /// via DECSCUSR (so e.g. nvim can request a blinking cursor), but "back to default" returns to the
+    /// user-configured shape instead of the hardcoded xterm blinking block. `nil` keeps xterm behavior.
+    public var defaultCursorStyle: CursorStyle? = nil
     
     //
     // CSI Ps SP q  Set cursor style (DECSCUSR, VT520).
@@ -3245,7 +3251,14 @@ open class Terminal {
         if collect.count == 0 || collect != [32] { /* space */
             return
         }
-        let p = max (pars.count == 0 ? 1 : pars [0], 1)
+        // Ps=0 means "reset to the terminal default"; honor a user-configured default if set (kitty
+        // `cursor_shape`), else fall back to the xterm default (blinking block, same as Ps=1).
+        let raw = pars.count == 0 ? 1 : pars [0]
+        if raw == 0 {
+            setCursorStyle (defaultCursorStyle ?? .blinkBlock)
+            return
+        }
+        let p = max (raw, 1)
         switch (p) {
         case 1, 0:
             setCursorStyle (.blinkBlock)
