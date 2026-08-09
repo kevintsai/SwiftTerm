@@ -4222,6 +4222,10 @@ open class Terminal {
                 break
             case 2026: // synchronized output (https://github.com/contour-terminal/vt-extensions)
                 endSynchronizedOutput ()
+            case 2031, 7727:
+                // Recognised, deliberately not implemented — see the DECSET side for the rationale.
+                // Listed explicitly so "unhandled" stays a signal rather than steady console noise.
+                break
             default:
                 log ("Unhandled DEC Private Mode Reset (DECRST) with \(par)")
                 break
@@ -4458,6 +4462,26 @@ open class Terminal {
                 bracketedPasteMode = true
             case 2026: // synchronized output (https://github.com/contour-terminal/vt-extensions)
                 beginSynchronizedOutput ()
+            case 2031:
+                // Color scheme change notifications
+                // (https://contour-terminal.org/vt-extensions/color-palette-update-notifications/).
+                // Enabling it asks us to emit an unsolicited DSR (`CSI ? 997 ; 1 n` dark /
+                // `; 2 n` light) whenever the OS/terminal theme flips. We do not implement it:
+                // it needs an appearance observer on the host side plus a reply channel, and an
+                // app that gets no notification simply keeps its current palette — a missing
+                // convenience, not a broken terminal.
+                //
+                // Recognised explicitly rather than left to `default` so that "unhandled" keeps
+                // meaning "we have never looked at this". Claude Code and Neovim set 2031 on
+                // every startup, so leaving it in `default` prints a line per launch in DEBUG
+                // builds and trains the reader to ignore the whole category.
+                break
+            case 7727:
+                // mintty's application escape key mode (ESC transmits `\eO[` instead of `\e`,
+                // letting apps tell a real ESC keypress from the start of an escape sequence).
+                // Not implemented: it changes key encoding, so a half-done version is worse than
+                // none. Same reason as 2031 for listing it here instead of logging it.
+                break
             default:
                 log ("Unhandled DEC Private Mode Set (DECSET) with \(par)")
                 break;
