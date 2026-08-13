@@ -56,7 +56,14 @@ final class CursorTrailView: NSView {
     private var needsRender = false
     private var cursorVisible = true
     private var updatedAt: CFTimeInterval = 0
-    private var positionChangedAt: CFTimeInterval = 0
+    /// When the CLIENT PROGRAM last moved the cursor (`Terminal.cursorPositionChangedAt`, a parse-time stamp on
+    /// `ProcessInfo.systemUptime`) — kitty's `cursor->position_changed_by_client_at`. **Not** "when this view
+    /// last noticed a different position": a renderer samples at most a few dozen times a second, so a
+    /// render-time stamp always looks "still" one frame later and the stillness gate degenerates into "follow
+    /// whatever I happened to sample". That is what made the trail chase the transient positions an app sweeps
+    /// through mid-redraw (cursor parked at the top of the pane, then back to the prompt) instead of ignoring
+    /// them the way kitty does.
+    private var clientMovedAt: CFTimeInterval = 0
     /// True while the display link is running and the quad should be drawn.
     private var active = false
     private var everPositioned = false
@@ -105,18 +112,19 @@ final class CursorTrailView: NSView {
 
     /// Called from `updateCursorPosition()` on every cursor move / redraw. `rect` is the caret frame
     /// in this view's coordinate space; `visible` is whether the caret is currently shown.
-    func cursorMoved(rect: CGRect, cellWidth: CGFloat, cellHeight: CGFloat, visible: Bool) {
+    /// `clientMovedAt` is `Terminal.cursorPositionChangedAt` (the parse-time stamp); pass 0 when unknown, which
+    /// makes the stillness gate open immediately (previous behaviour).
+    func cursorMoved(rect: CGRect, cellWidth: CGFloat, cellHeight: CGFloat, visible: Bool,
+                     clientMovedAt: CFTimeInterval) {
         cellW = max(1, cellWidth)
         cellH = max(1, cellHeight)
         let left = rect.minX, right = rect.maxX, bottom = rect.minY, top = rect.maxY
-        let changed = abs(left - rawEdgeX[0]) > 0.01 || abs(right - rawEdgeX[1]) > 0.01
-            || abs(top - rawEdgeY[0]) > 0.01 || abs(bottom - rawEdgeY[1]) > 0.01
         rawEdgeX = [left, right]
         rawEdgeY = [top, bottom]
         cursorVisible = visible
+        self.clientMovedAt = clientMovedAt
 
         let now = CACurrentMediaTime()
-        if changed { positionChangedAt = now }
 
         // First placement: snap everything to the cursor so the trail never animates in from (0,0).
         if !everPositioned {
@@ -159,8 +167,10 @@ final class CursorTrailView: NSView {
         let now = CACurrentMediaTime()
         if updatedAt == 0 { updatedAt = now }
 
-        // 1. Commit the target once the cursor has been still long enough (kitty stillness gate).
-        if now - positionChangedAt >= stillness {
+        // 1. Commit the target once the cursor has been still long enough (kitty stillness gate). The clock is
+        //    the PROGRAM's last cursor move — while it is still painting a frame the target stays frozen, so the
+        //    trail never chases a position the app is only passing through.
+        if clientNow() - clientMovedAt >= stillness {
             edgeX = rawEdgeX
             edgeY = rawEdgeY
         }
@@ -188,6 +198,17 @@ final class CursorTrailView: NSView {
             setNeedsDisplay(bounds) // clear the settled quad (it now exactly overlaps the caret)
         }
     }
+
+    /// "Now" on the same monotonic clock as `clientMovedAt` (`Terminal.cursorPositionChangedAt`).
+    /// Injectable so the stillness gate can be tested deterministically.
+    var clientClock: () -> CFTimeInterval = { ProcessInfo.processInfo.systemUptime }
+    private func clientNow() -> CFTimeInterval { clientClock() }
+
+    /// Test seam: the committed target the corners are easing toward, as `[top, bottom]` in point space.
+    /// The gate's whole job is deciding *when* this is allowed to follow the cursor.
+    var committedTargetYForTesting: [CGFloat] { edgeY }
+    /// Test seam: run one animation frame without waiting for the timer.
+    func stepForTesting() { step() }
 
     private func targetX(_ i: Int) -> CGFloat { edgeX[Self.cornerIndexX[i]] }
     private func targetY(_ i: Int) -> CGFloat { edgeY[Self.cornerIndexY[i]] }

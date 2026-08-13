@@ -340,6 +340,17 @@ open class Terminal {
      */
     public private(set) var buffer: Buffer
 
+    /// When the **client program** last moved the cursor, on a monotonic clock
+    /// (`ProcessInfo.systemUptime`). Stamped while parsing, NOT while rendering.
+    ///
+    /// This is kitty's `cursor->position_changed_by_client_at`, and the cursor-trail animation gates on it
+    /// (`cursor_trail <ms>` = how long the cursor must have been still before the trail follows). The
+    /// distinction matters: a renderer only samples the cursor a few dozen times a second, so "the position
+    /// differs from the last frame I drew" says nothing about whether the program has settled. An app that is
+    /// mid-redraw — sweeping the cursor down the screen before parking it back at its prompt — keeps this
+    /// stamp fresh, which is exactly how the trail knows not to chase those transient positions.
+    public private(set) var cursorPositionChangedAt: TimeInterval = 0
+
     private let synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
     public private(set) var synchronizedOutputActive: Bool = false
     private var synchronizedOutputTimeoutItem: DispatchWorkItem?
@@ -5042,7 +5053,17 @@ open class Terminal {
      */
     public func parse (buffer: ArraySlice<UInt8>)
     {
+        let before = cursorSnapshot()
         parser.parse(data: buffer)
+        if cursorSnapshot() != before {
+            cursorPositionChangedAt = ProcessInfo.processInfo.systemUptime
+        }
+    }
+
+    /// The cursor's absolute position, used to detect "the client moved the cursor during this feed".
+    /// Includes the scroll origin so scrolled-in output counts as movement.
+    private func cursorSnapshot () -> (Int, Int, Int) {
+        (buffer.x, buffer.y, buffer.yBase)
     }
      
     /**

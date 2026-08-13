@@ -358,7 +358,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             rect: caretView.frame,
             cellWidth: cellDimension.width,
             cellHeight: cellDimension.height,
-            visible: visible)
+            visible: visible,
+            // Parse-time stamp — see `CursorTrailView.clientMovedAt`.
+            clientMovedAt: terminal?.cursorPositionChangedAt ?? 0)
     }
 
     /// Marked (uncommitted) text from an input source (IME, dictation, etc.).
