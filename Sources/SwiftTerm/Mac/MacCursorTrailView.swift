@@ -38,8 +38,15 @@ final class CursorTrailView: NSView {
     var decayFast: CGFloat = 0.1
     var decaySlow: CGFloat = 0.4
     var startThreshold: Int = 2
-    /// kitty `cursor_trail` stillness gate, in seconds (its option is milliseconds).
-    var stillness: CFTimeInterval = 0.001
+    /// kitty `cursor_trail` stillness gate, in seconds (its option is milliseconds): the target only follows
+    /// a cursor the CLIENT has left alone for this long.
+    ///
+    /// kitty ships 1–3ms because it parses everything pending and draws the result in one lockstep frame, so a
+    /// position the program is only passing through is never a position it renders. A view that samples the
+    /// terminal on its own timer has no such guarantee: it reads whatever the last completed feed left behind,
+    /// up to a frame later. The gate therefore has to outlast one sampling interval (16.7ms) to mean anything
+    /// here — under it, "the program moved the cursor 5ms ago" still reads as "settled".
+    var stillness: CFTimeInterval = 0.030
 
     // Cell size in points (from the terminal's `cellDimension`), for the cell-based thresholds.
     private var cellW: CGFloat = 8
@@ -118,11 +125,21 @@ final class CursorTrailView: NSView {
                      clientMovedAt: CFTimeInterval) {
         cellW = max(1, cellWidth)
         cellH = max(1, cellHeight)
-        let left = rect.minX, right = rect.maxX, bottom = rect.minY, top = rect.maxY
-        rawEdgeX = [left, right]
-        rawEdgeY = [top, bottom]
         cursorVisible = visible
         self.clientMovedAt = clientMovedAt
+
+        // A HIDDEN cursor has no position worth trailing. Programs and tmux both park the cursor wherever it
+        // is cheapest while `DECTCEM` is off — tmux sweeps it clear across the pane between frames — and none
+        // of those cells were ever on screen. Sampling them is how a trail ends up flying to a corner nobody's
+        // cursor visited. Keep the last position the user could actually see; the opacity ramp below still
+        // fades the quad out for as long as the cursor stays hidden.
+        if visible {
+            rawEdgeX = [rect.minX, rect.maxX]
+            rawEdgeY = [rect.maxY, rect.minY]
+        } else if !everPositioned {
+            // Nothing to anchor to yet — wait for a visible cursor rather than snapping to a hidden one.
+            return
+        }
 
         let now = CACurrentMediaTime()
 
@@ -169,8 +186,11 @@ final class CursorTrailView: NSView {
 
         // 1. Commit the target once the cursor has been still long enough (kitty stillness gate). The clock is
         //    the PROGRAM's last cursor move — while it is still painting a frame the target stays frozen, so the
-        //    trail never chases a position the app is only passing through.
-        if clientNow() - clientMovedAt >= stillness {
+        //    trail never chases a position the app is only passing through. A hidden cursor never commits at
+        //    all: `cursorMoved` stops refreshing the position while it is hidden, so the pending one is stale
+        //    by definition, and letting the gate expire over it would drag the trail to wherever the cursor
+        //    happened to be when it vanished.
+        if cursorVisible && clientNow() - clientMovedAt >= stillness {
             edgeX = rawEdgeX
             edgeY = rawEdgeY
         }

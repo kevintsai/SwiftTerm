@@ -320,6 +320,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public var cursorTrailStartThreshold: Int = 2 {
         didSet { cursorTrailView?.startThreshold = cursorTrailStartThreshold }
     }
+    /// kitty `cursor_trail` (seconds; its option is milliseconds): how long the client program must leave the
+    /// cursor alone before the trail follows it. See `CursorTrailView.stillness` for why the useful floor here
+    /// is a sampling interval rather than kitty's 1–3ms.
+    public var cursorTrailStillness: Double = 0.030 {
+        didSet { cursorTrailView?.stillness = CFTimeInterval(cursorTrailStillness) }
+    }
 
     /// The cursor style restored on `DECSCUSR 0` (reset to default) — kitty's `cursor_shape`. Applications
     /// still drive the cursor via DECSCUSR (nvim can request a blink), but "reset" returns here instead of
@@ -338,6 +344,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             v.decayFast = CGFloat(cursorTrailDecayFast)
             v.decaySlow = CGFloat(cursorTrailDecaySlow)
             v.startThreshold = cursorTrailStartThreshold
+            v.stillness = CFTimeInterval(cursorTrailStillness)
             // Below the caret so the opaque block always covers the trail's leading edge.
             if let caretView, caretView.superview == self {
                 addSubview(v, positioned: .below, relativeTo: caretView)

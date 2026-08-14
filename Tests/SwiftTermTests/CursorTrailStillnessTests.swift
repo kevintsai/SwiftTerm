@@ -127,4 +127,107 @@ final class CursorTrailStillnessTests: XCTestCase {
         XCTAssertEqual(v.committedTargetYForTesting[0], rect(row: 5).maxY, accuracy: 0.01)
     }
 }
+
+/// The gap the first stillness fix left open: what tmux emits BETWEEN two synchronized frames.
+///
+/// Recorded off a real (isolated) tmux server with the client advertising `sync`, 200x60 pane, a TUI
+/// repainting ~20fps — 39 of 41 inter-frame windows were byte-for-byte this shape:
+///
+///     ESC[?2026l  ESC[5;170H  ESC[?25l  ESC[10;153H … ESC[54;173H  ESC[?2026h  <next frame>
+///
+/// i.e. tmux ends the synchronized block, moves the STILL-VISIBLE cursor to a fixed spot near the top right,
+/// only then hides it and sweeps it across the pane, and only then opens the next synchronized block. Nothing
+/// in that window is inside a synchronized update, so a view that samples on its own timer is free to render
+/// it — and the trail flies to the top right and snaps back, always in the same direction. (Measured exposure
+/// of that state: 0.1–0.9ms, which is why it shows up as an occasional flick rather than a constant smear.)
+///
+/// Two rules close it, and this test pins both:
+///   1. a stillness gate that outlasts one sampling interval (the visible top-right jump), and
+///   2. never sampling a HIDDEN cursor's position (the sweep that follows).
+final class CursorTrailTmuxInterFrameTests: XCTestCase {
+    private final class HeadlessDelegate: TerminalDelegate {
+        func showCursor(source: Terminal) {}
+        func hideCursor(source: Terminal) {}
+        func setTerminalTitle(source: Terminal, title: String) {}
+        func setTerminalIconTitle(source: Terminal, title: String) {}
+        func windowCommand(source: Terminal, command: Terminal.WindowManipulationCommand) -> [UInt8]? { nil }
+        func sizeChanged(source: Terminal) {}
+        func send(source: Terminal, data: ArraySlice<UInt8>) {}
+        func scrolled(source: Terminal, yDisp: Int) {}
+        func linefeed(source: Terminal) {}
+        func bufferActivated(source: Terminal) {}
+        func bell(source: Terminal) {}
+    }
+
+    private let cellW: CGFloat = 8, cellH: CGFloat = 16, viewH: CGFloat = 960  // 60 rows × 16pt
+
+    /// The caret rect for the terminal's CURRENT cursor cell, the way `updateCursorPosition()` computes it.
+    private func caretRect(_ t: Terminal) -> CGRect {
+        CGRect(x: CGFloat(t.buffer.x) * cellW, y: viewH - CGFloat(t.buffer.y + 1) * cellH,
+               width: cellW, height: cellH)
+    }
+
+    /// One render: sample the terminal exactly like `notifyCursorTrail(visible:)` does, `delay` seconds after
+    /// the client's last cursor move (a view samples up to a frame late — that lateness is the whole bug).
+    private func render(_ v: CursorTrailView, _ t: Terminal, delay: CFTimeInterval) {
+        v.clientClock = { t.cursorPositionChangedAt + delay }
+        v.cursorMoved(rect: caretRect(t), cellWidth: cellW, cellHeight: cellH,
+                      visible: !t.cursorHidden, clientMovedAt: t.cursorPositionChangedAt)
+        v.stepForTesting()
+    }
+
+    private func feed(_ t: Terminal, _ s: String) {
+        let bytes = Array(s.utf8)
+        t.feed(buffer: bytes[...])
+    }
+
+    func testTheTrailIgnoresTmuxsUnsynchronizedGapBetweenFrames() {
+        let t = Terminal(delegate: HeadlessDelegate())
+        t.resize(cols: 200, rows: 60)
+        let v = CursorTrailView(frame: CGRect(x: 0, y: 0, width: 1600, height: viewH))
+
+        // Settled at the prompt (row 59, col 5) — the app has been idle there.
+        feed(t, "\u{1b}[59;5H\u{1b}[?25h")
+        render(v, t, delay: 1.0)
+        let prompt = v.committedTargetYForTesting
+        XCTAssertEqual(prompt[0], caretRect(t).maxY, accuracy: 0.01, "the trail starts settled on the prompt")
+
+        // tmux closes the frame and jumps the still-VISIBLE cursor to the top right. A chunk boundary here
+        // means this is the state the next render samples — one frame (16.7ms) later.
+        feed(t, "\u{1b}[?2026l\u{1b}[5;170H")
+        render(v, t, delay: 0.0167)
+        XCTAssertEqual(v.committedTargetYForTesting, prompt,
+                       "a position the client set a frame ago is not 'settled' — the trail must stay on the prompt")
+
+        // …then tmux hides the cursor and sweeps it across the whole pane. Give these MORE than the gate, so
+        // only the hidden-cursor rule can save us: those cells were never on screen.
+        for move in ["\u{1b}[?25l\u{1b}[10;153H", "\u{1b}[15;132H", "\u{1b}[30;69H", "\u{1b}[54;173H"] {
+            feed(t, move)
+            render(v, t, delay: 0.5)
+            XCTAssertEqual(v.committedTargetYForTesting, prompt,
+                           "the cursor is hidden — the trail must not chase where tmux parked it")
+        }
+
+        // Next frame: tmux repaints inside a synchronized block, puts the cursor back on the prompt, shows it.
+        feed(t, "\u{1b}[?2026h\u{1b}[1;1Hrepainted\u{1b}[59;5H\u{1b}[?25h\u{1b}[?2026l")
+        render(v, t, delay: 0.5)
+        XCTAssertEqual(v.committedTargetYForTesting, prompt, "back where it started — nothing to animate")
+    }
+
+    /// The gate must not become a freeze: a real move the program then leaves alone is still followed.
+    func testARealMoveIsStillFollowedOnceTheProgramLeavesItAlone() {
+        let t = Terminal(delegate: HeadlessDelegate())
+        t.resize(cols: 200, rows: 60)
+        let v = CursorTrailView(frame: CGRect(x: 0, y: 0, width: 1600, height: viewH))
+
+        feed(t, "\u{1b}[59;5H\u{1b}[?25h")
+        render(v, t, delay: 1.0)
+        let prompt = v.committedTargetYForTesting
+
+        feed(t, "\u{1b}[10;40H")
+        render(v, t, delay: 0.5)  // quiet for 500ms ≫ the gate
+        XCTAssertNotEqual(v.committedTargetYForTesting, prompt, "a settled move is followed")
+        XCTAssertEqual(v.committedTargetYForTesting[0], caretRect(t).maxY, accuracy: 0.01)
+    }
+}
 #endif
