@@ -5234,6 +5234,21 @@ open class Terminal {
     public func getCursorLocation() -> (x: Int, y: Int) {
         return (buffer.x, buffer.y)
     }
+
+    /**
+     * Returns the cursor position in **viewport** coordinates - the same coordinate space as
+     * `getLine(row:)` - or nil when the cursor is scrolled out of the visible region.
+     *
+     * `getCursorLocation()` returns `buffer.y`, which is relative to `buffer.yBase`, while
+     * `getLine(row:)` indexes relative to `buffer.yDisp`. Those two agree only while the user has not
+     * scrolled back. Since `yBase` is internal, a caller outside the library cannot reconcile them -
+     * it can only produce a cursor row that is silently wrong for a scrolled-back terminal.
+     */
+    public func getCursorViewportLocation() -> (x: Int, y: Int)? {
+        let row = buffer.y + buffer.yBase - buffer.yDisp
+        guard row >= 0 && row < rows else { return nil }
+        return (buffer.x, row)
+    }
     
     /**
      * Returns the uppermost visible row on the terminal buffer

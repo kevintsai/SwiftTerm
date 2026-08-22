@@ -953,6 +953,18 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         return NSRect (x: 0, y: 0, width: cellDimension.width * CGFloat(terminal.cols) + reservedScrollerWidth, height: cellDimension.height * CGFloat(terminal.rows))
     }
 
+    /**
+     * The size of one character cell, in points.
+     *
+     * `getOptimalFrameSize()` cannot be used to derive this: it adds `reservedScrollerWidth`, which is
+     * private, so dividing its width by `terminal.cols` over-estimates the cell width for any view that
+     * shows a scroller. Callers that need to map a (column, row) to a point - drawing an overlay aligned
+     * to the character grid, say - need the cell size itself.
+     */
+    public var cellDimensions: (width: CGFloat, height: CGFloat) {
+        (cellDimension.width, cellDimension.height)
+    }
+
     func getEffectiveWidth (size: CGSize) -> CGFloat
     {
         max(0, size.width - reservedScrollerWidth)
