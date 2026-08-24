@@ -105,6 +105,58 @@ public class LocalProcess {
     private let pendingLowWaterBytes = 1 * 1024 * 1024
     private var pendingBytes = 0
     private var readSuspendedForBackpressure = false
+    // The host parked this process (see `setReadSuspended`). Deliberately a SECOND flag rather than a mode
+    // on the one above: the two reasons start and stop independently, and collapsing them is how you get
+    // "the backlog drained, so we un-parked a terminal the host had deliberately parked".
+    private var readSuspendedByHost = false
+    // How many read CHAINS are live. The read loop is a chain — one op arms the next — so arming it again
+    // while a chain is running gives you two chains, then four (the `done` gate in `childProcessRead` exists
+    // for the same reason). A doubled chain still *works*, which is why this is a count and not a bool: the
+    // only visible symptom is CPU and memory, so the invariant has to be assertable. Must never exceed 1.
+    private var liveReadChains = 0
+
+    /// Test seam: how many PTY read chains are outstanding. The invariant is `<= 1` at all times — see
+    /// `liveReadChains`. Not for production use; a host has no business knowing this.
+    public var readChainDepthForTesting: Int {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        return liveReadChains
+    }
+
+    /// Whether the host has parked this process's PTY read. See ``setReadSuspended(_:)``.
+    public var isReadSuspended: Bool {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        return readSuspendedByHost
+    }
+
+    /// Park or resume reading the pseudo-terminal, on the host's own terms.
+    ///
+    /// While parked, the read is not re-armed: the kernel PTY buffer fills and the child blocks in `write()`,
+    /// exactly like a terminal whose user stopped reading it. This is the same mechanism the backlog
+    /// high-water mark already uses; the read re-arms only when BOTH reasons are clear.
+    ///
+    /// Intended for a host that keeps terminals alive off-screen — parsing bytes nobody can see costs exactly
+    /// as much as parsing bytes they can. A multiplexer that owns the real screen (tmux) responds by dropping
+    /// output while the reader is away and repainting when it returns, so the visible screen is correct on
+    /// resume; what is lost is the off-screen stretch of *this view's* scrollback, which the multiplexer still
+    /// holds. Do not use it for a process whose output only exists here.
+    ///
+    /// **Parking is not instantaneous.** It takes effect when the read operation already in flight completes,
+    /// and a `DispatchIO` read completes at `readSize` bytes (or EOF) — so a child that only trickles keeps
+    /// being delivered for a while. That is self-balancing rather than broken: the CPU parking saves is
+    /// proportional to output, and so is how fast it engages. See
+    /// `LocalProcessReadSuspensionTests.testParkingATricklingChildIsNotImmediate`, which pins the behaviour.
+    ///
+    /// Idempotent, and safe to call from any thread.
+    public func setReadSuspended(_ suspended: Bool) {
+        pendingLock.lock()
+        let changed = readSuspendedByHost != suspended
+        readSuspendedByHost = suspended
+        pendingLock.unlock()
+        guard changed, !suspended else { return }
+        resumePtyRead()
+    }
     
     #if false //canImport(Subprocess)
     // Swift Subprocess related properties
@@ -135,10 +187,11 @@ public class LocalProcess {
         pendingLock.lock()
         pendingChunks.append(bytes)
         pendingBytes += bytes.count
-        let keepReading = pendingBytes < pendingHighWaterBytes
-        if !keepReading {
+        let underHighWater = pendingBytes < pendingHighWaterBytes
+        if !underHighWater {
             readSuspendedForBackpressure = true
         }
+        let keepReading = underHighWater && !readSuspendedByHost
         let shouldSchedule = !pendingScheduled
         if shouldSchedule {
             pendingScheduled = true
@@ -155,6 +208,11 @@ public class LocalProcess {
     // Re-arm the PTY read loop after a backpressure pause.
     private func resumePtyRead() {
         guard running, let io else { return }
+        pendingLock.lock()
+        let blocked = liveReadChains > 0 || readSuspendedByHost || readSuspendedForBackpressure
+        if !blocked { liveReadChains += 1 }
+        pendingLock.unlock()
+        guard !blocked else { return }
         io.read(offset: 0, length: readSize, queue: readQueue) { [weak self] done, data, errno in
             self?.childProcessRead(done: done, data: data, errno: errno)
         }
@@ -179,7 +237,8 @@ public class LocalProcess {
                     pendingBytes -= chunk.count
                     if readSuspendedForBackpressure && pendingBytes <= pendingLowWaterBytes {
                         readSuspendedForBackpressure = false
-                        resumeRead = true
+                        // `resumePtyRead` re-checks under the lock; this is only "the backlog reason is gone".
+                        resumeRead = !readSuspendedByHost
                     }
                 }
             } else {
@@ -334,10 +393,21 @@ public class LocalProcess {
             dispatchQueue.sync {
                 self.delegate?.dataReceived(slice: b[...])
             }
+            // No backlog to gate on for a custom queue, but the host's park applies to every path.
+            pendingLock.lock()
+            keepReading = !readSuspendedByHost
+            pendingLock.unlock()
         }
-        if done && keepReading {
-            io?.read(offset: 0, length: readSize, queue: readQueue) { [weak self] done, data, errno in
-                self?.childProcessRead(done: done, data: data, errno: errno)
+        if done {
+            if keepReading {
+                io?.read(offset: 0, length: readSize, queue: readQueue) { [weak self] done, data, errno in
+                    self?.childProcessRead(done: done, data: data, errno: errno)
+                }
+            } else {
+                // The chain stops here; whoever clears the reason calls `resumePtyRead` to start a new one.
+                pendingLock.lock()
+                liveReadChains -= 1
+                pendingLock.unlock()
             }
         }
     }
@@ -537,6 +607,9 @@ public class LocalProcess {
             }
             io.setLimit(lowWater: 1)
             io.setLimit(highWater: readSize)
+            pendingLock.lock()
+            liveReadChains += 1
+            pendingLock.unlock()
             io.read(offset: 0, length: readSize, queue: readQueue) { [weak self] done, data, errno in
                 self?.childProcessRead(done: done, data: data, errno: errno)
             }
