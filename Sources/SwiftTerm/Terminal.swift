@@ -5671,7 +5671,23 @@ open class Terminal {
         }
     }
 
-    private func endSynchronizedOutput ()
+    /// Ends a synchronized block.
+    ///
+    /// **What is deliberately NOT done here: marking the whole screen dirty.** The dirty range accumulated
+    /// during the block is still intact — the view's `updateDisplay` returns early while the flag is set,
+    /// and it returns *before* `clearUpdateRange()`, so nothing consumed it. Widening it to `0...rows-1`
+    /// threw that away and turned every synchronized frame into a full repaint of every row.
+    ///
+    /// That is not a small cost for an embedder that runs one of these per frame. tmux wraps each of its
+    /// redraws in a begin/end pair for any client that advertises DEC 2026, while sending only the cells
+    /// that actually changed — measured 11.8 KB over 8 s for a full-screen TUI. So the input was already a
+    /// diff, and the blunt refresh was the only reason the renderer treated it as a full frame.
+    ///
+    /// `recovering` is the exception, and the reason the blunt version looked safe: when the block ends
+    /// because the **timeout** fired, a program began a synchronized update and never finished it. What it
+    /// managed to write before dying is anyone's guess, so repaint everything rather than trust a range
+    /// that may describe half an update.
+    private func endSynchronizedOutput (recovering: Bool = false)
     {
         guard synchronizedOutputActive else {
             return
@@ -5679,7 +5695,9 @@ open class Terminal {
         synchronizedOutputActive = false
         synchronizedOutputTimeoutItem?.cancel()
         synchronizedOutputTimeoutItem = nil
-        refresh (startRow: 0, endRow: rows - 1)
+        if recovering {
+            refresh (startRow: 0, endRow: rows - 1)
+        }
         tdel?.synchronizedOutputChanged(source: self, active: false)
     }
 
@@ -5690,7 +5708,8 @@ open class Terminal {
             guard let self, self.synchronizedOutputActive else {
                 return
             }
-            self.endSynchronizedOutput()
+            // The program never sent its end marker — repaint everything, see `endSynchronizedOutput`.
+            self.endSynchronizedOutput(recovering: true)
         }
         synchronizedOutputTimeoutItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + synchronizedOutputTimeoutSeconds, execute: workItem)
