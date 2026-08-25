@@ -110,6 +110,84 @@ final class CursorTrailStillnessTests: XCTestCase {
         XCTAssertEqual(v.committedTargetYForTesting, settled, "still painting → still frozen")
     }
 
+    /// The reported symptom (Kevin, 2026-08-25): holding `j` in nvim left the trail anchored at the cell the
+    /// cursor started from, repainting the whole span between there and the cursor, for as long as the key
+    /// was held — "按住時原本位置持續反白，放開才收".
+    ///
+    /// macOS key repeat (~30 ms) outpaces a 30 ms gate forever, so the gate never opened. It must yield once
+    /// it has been holding longer than any plausible frame.
+    func testHoldingAMovementKeyEventuallyLetsTheTrailFollow() {
+        var now: CFTimeInterval = 100
+        let v = makeView(clock: { now })
+        v.maxFreezeSeconds = 0.20
+        v.stillness = 0.030  // the real default: key repeat is right on top of it
+
+        v.cursorMoved(rect: rect(row: 25), cellWidth: 8, cellHeight: 16, visible: true, clientMovedAt: now - 1)
+        v.stepForTesting()
+        let start = v.committedTargetYForTesting
+
+        // Key repeat: one row every 25 ms, never still for the full 30 ms.
+        var row: CGFloat = 25
+        for _ in 0..<6 {  // 150 ms — still inside a plausible repaint, so still frozen
+            now += 0.025
+            row -= 1
+            v.cursorMoved(rect: rect(row: row), cellWidth: 8, cellHeight: 16, visible: true, clientMovedAt: now)
+            v.stepForTesting()
+        }
+        XCTAssertEqual(v.committedTargetYForTesting, start,
+                       "150ms of movement is still within what a repaint could be — keep suppressing it")
+
+        for _ in 0..<4 {  // past 200 ms of unbroken movement: this is a person, not a frame
+            now += 0.025
+            row -= 1
+            v.cursorMoved(rect: rect(row: row), cellWidth: 8, cellHeight: 16, visible: true, clientMovedAt: now)
+            v.stepForTesting()
+        }
+        XCTAssertEqual(v.committedTargetYForTesting[0], rect(row: row).maxY, accuracy: 0.01,
+                       "the gate must yield and let the trail follow the cursor")
+
+        // And it must keep following, not commit once every maxFreezeSeconds and jump.
+        now += 0.025
+        row -= 1
+        v.cursorMoved(rect: rect(row: row), cellWidth: 8, cellHeight: 16, visible: true, clientMovedAt: now)
+        v.stepForTesting()
+        XCTAssertEqual(v.committedTargetYForTesting[0], rect(row: row).maxY, accuracy: 0.01,
+                       "still following on the very next step")
+    }
+
+    /// Releasing the key must clear the latch — otherwise the first repaint AFTER a held key would smear,
+    /// which is the bug the gate exists to prevent, just moved somewhere harder to notice.
+    func testSuppressionComesBackAfterTheKeyIsReleased() {
+        var now: CFTimeInterval = 100
+        let v = makeView(clock: { now })
+        v.maxFreezeSeconds = 0.20
+        v.stillness = 0.030
+
+        v.cursorMoved(rect: rect(row: 25), cellWidth: 8, cellHeight: 16, visible: true, clientMovedAt: now - 1)
+        v.stepForTesting()
+
+        var row: CGFloat = 25
+        for _ in 0..<12 {  // hold long enough to start chasing
+            now += 0.025
+            row -= 1
+            v.cursorMoved(rect: rect(row: row), cellWidth: 8, cellHeight: 16, visible: true, clientMovedAt: now)
+            v.stepForTesting()
+        }
+        XCTAssertEqual(v.committedTargetYForTesting[0], rect(row: row).maxY, accuracy: 0.01, "precondition: chasing")
+
+        // Key released: the cursor is left alone for well over the gate.
+        now += 0.100
+        v.stepForTesting()
+        let settled = v.committedTargetYForTesting
+
+        // Now an app repaints, sweeping the visible cursor far away for a few milliseconds.
+        now += 0.001
+        v.cursorMoved(rect: rect(row: 1), cellWidth: 8, cellHeight: 16, visible: true, clientMovedAt: now)
+        v.stepForTesting()
+        XCTAssertEqual(v.committedTargetYForTesting, settled,
+                       "the latch must not survive the key being released — a sweep has to be suppressed again")
+    }
+
     /// Once the program has been quiet for longer than the gate, the target follows normally.
     func testTargetFollowsOnceTheProgramHasSettled() {
         var now: CFTimeInterval = 100

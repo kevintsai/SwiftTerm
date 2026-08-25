@@ -48,6 +48,20 @@ final class CursorTrailView: NSView {
     /// here — under it, "the program moved the cursor 5ms ago" still reads as "settled".
     var stillness: CFTimeInterval = 0.030
 
+    /// How long the stillness gate may hold the target back before it yields, in seconds.
+    ///
+    /// The gate exists to ignore positions an app is only *passing through* while it paints — and painting a
+    /// frame is bounded in time. Sustained cursor movement is not: hold `j` in nvim and the key repeat
+    /// (~30 ms on macOS) outpaces a 30 ms gate forever, so the target never commits, and the trail is drawn
+    /// from wherever the cursor started all the way to wherever it is now — for as long as the key is held.
+    /// Kevin reported exactly that on 2026-08-25: "按住時原本位置持續反白，放開才收".
+    ///
+    /// So the gate yields once it has been holding longer than any plausible frame. Deliberately expressed
+    /// as TIME rather than distance: a repaint sweep moves the cursor a long way with the cursor *visible*
+    /// (`testTargetIsFrozenWhileTheProgramKeepsMovingTheCursor` is that case), so a distance cap would
+    /// reopen the very bug that test pins, while a sweep is over in a few milliseconds.
+    var maxFreezeSeconds: CFTimeInterval = 0.20
+
     // Cell size in points (from the terminal's `cellDimension`), for the cell-based thresholds.
     private var cellW: CGFloat = 8
     private var cellH: CGFloat = 16
@@ -71,6 +85,11 @@ final class CursorTrailView: NSView {
     /// through mid-redraw (cursor parked at the top of the pane, then back to the prompt) instead of ignoring
     /// them the way kitty does.
     private var clientMovedAt: CFTimeInterval = 0
+    /// When the gate first started holding a pending position back, on `clientClock`. 0 = not holding.
+    private var frozenSince: CFTimeInterval = 0
+    /// Latched once the gate has yielded (see `maxFreezeSeconds`), so the target keeps following instead of
+    /// committing once every `maxFreezeSeconds` and jumping. Cleared the moment the cursor actually settles.
+    private var chasing = false
     /// True while the display link is running and the quad should be drawn.
     private var active = false
     private var everPositioned = false
@@ -190,9 +209,25 @@ final class CursorTrailView: NSView {
         //    all: `cursorMoved` stops refreshing the position while it is hidden, so the pending one is stale
         //    by definition, and letting the gate expire over it would drag the trail to wherever the cursor
         //    happened to be when it vanished.
-        if cursorVisible && clientNow() - clientMovedAt >= stillness {
-            edgeX = rawEdgeX
-            edgeY = rawEdgeY
+        if cursorVisible {
+            let now = clientNow()
+            if now - clientMovedAt >= stillness {
+                // Settled: commit, and forget that we were ever holding anything back.
+                frozenSince = 0
+                chasing = false
+                edgeX = rawEdgeX
+                edgeY = rawEdgeY
+            } else if rawEdgeX != edgeX || rawEdgeY != edgeY {
+                // The gate is holding a pending position back. Time it: a frame ends, a held key does not.
+                if frozenSince == 0 { frozenSince = now }
+                if chasing || now - frozenSince >= maxFreezeSeconds {
+                    chasing = true
+                    edgeX = rawEdgeX
+                    edgeY = rawEdgeY
+                }
+            } else {
+                frozenSince = 0
+            }
         }
 
         // 2. Ease the corners toward the target.
