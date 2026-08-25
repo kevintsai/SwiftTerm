@@ -5076,8 +5076,30 @@ open class Terminal {
      * Scrolling tells if this was just issued as part of scrolling which we don't register for the
      * scroll-invariant update ranges.
      */
+    /// Bumped every time any part of the buffer is marked dirty.
+    ///
+    /// Exists for a host that samples the buffer on **its own** rhythm rather than inside `draw` — such a
+    /// host cannot use `getUpdateRange()`, because the view consumes and clears it every frame, so by the
+    /// time the sampler looks there is nothing left to see. A monotonic token can be compared instead:
+    /// same value = the buffer has not been touched since you last looked.
+    ///
+    /// ⚠ **Content only.** A pure cursor move (`CSI C`, `CSI D`) marks no row dirty, so it does NOT bump
+    /// this — same as `getUpdateRange()` returning nil for one. A sampler that cares where the cursor is
+    /// must compare that separately. See `ContentVersionTests`.
+    public private(set) var contentVersion: UInt64 = 0
+
+    /// Every path that marks the screen dirty funnels through the `updateRange` family, which is exactly
+    /// why the token lives here: if a mutation ever failed to reach one of these, the renderer would
+    /// already be failing to repaint it, so there is no way for the token to be wrong on its own.
+    @inline(__always)
+    private func bumpContentVersion() {
+        contentVersion &+= 1
+    }
+
     func updateRange (_ y: Int, scrolling: Bool = false)
-    {        
+    {
+        bumpContentVersion()
+        
         if !scrolling {
             let effectiveY = buffer._yDisp + y
             if effectiveY >= 0 {
@@ -5102,6 +5124,7 @@ open class Terminal {
 
     func updateRange (borrowing buffer: borrowing Buffer, _ y: Int, scrolling: Bool = false)
     {
+        bumpContentVersion()
         if !scrolling {
             let effectiveY = buffer._yDisp + y
             if effectiveY >= 0 {
@@ -5132,6 +5155,7 @@ open class Terminal {
     
     public func updateFullScreen ()
     {
+        bumpContentVersion()
         refreshStart = 0
         refreshEnd = rows
         
