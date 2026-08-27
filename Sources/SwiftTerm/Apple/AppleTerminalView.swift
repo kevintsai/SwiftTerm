@@ -138,6 +138,8 @@ extension TerminalView {
         self.urlAttributes = [:]
         self.colors = Array(repeating: nil, count: 256)
         self.trueColors = [:]
+        // Every shaped row was built against the dictionaries above. See AppleRowDrawCache.swift.
+        invalidateRowDrawCache()
     }
     
     // This is invoked when the font changes to recompute state
@@ -394,7 +396,9 @@ extension TerminalView {
     {
         urlAttributes = [:]
         attributes = [:]
-        
+        // Every shaped row baked these colours in. See AppleRowDrawCache.swift.
+        invalidateRowDrawCache()
+
         terminal.updateFullScreen ()
         queuePendingDisplay()
     }
@@ -1357,7 +1361,10 @@ extension TerminalView {
             } 
             #endif
             let line = displayBuffer.lines [row]
-            let lineInfo = buildAttributedString(row: row, line: line, cols: displayBuffer.cols)
+            // Shaped once and reused until something this row depends on changes — the band we are
+            // asked to repaint is usually far wider than the rows that actually moved.
+            // See AppleRowDrawCache.swift.
+            let (lineInfo, preparedSegments) = rowDrawState(row: row, line: line, cols: displayBuffer.cols)
             let rowBase = lineOrigin.y + cellDimension.height
             var underTextImages: [AppleImage] = []
             var overTextKittyImages: [AppleImage] = []
@@ -1388,15 +1395,6 @@ extension TerminalView {
                 underTextImages.sort(by: sortKitty)
                 overTextKittyImages.sort(by: sortKitty)
             }
-
-            // Pre-create CTLines and runs once per row to avoid duplicate creation
-            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])] =
-                lineInfo.segments.compactMap { segment in
-                    guard segment.attributedString.length > 0 else { return nil }
-                    let ctLine = CTLineCreateWithAttributedString(segment.attributedString)
-                    guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
-                    return (segment, ctLine, runs)
-                }
 
             // Background fill loop — uses cached CTLines
             context.saveGState()
@@ -1660,7 +1658,15 @@ extension TerminalView {
                 context.restoreGState()
             }
         }
-        
+
+        // Bound the cache by the SCREEN, not by the band we were just asked to repaint: a partial
+        // repaint (a DECSTBM scroll region, a one-line edit) covers a handful of rows, and pruning to
+        // that would evict everything else and make the next full repaint a cold cache. Not by the
+        // buffer either — that runs to the scrollback limit. See AppleRowDrawCache.swift.
+        let visibleTop = max(0, displayBuffer.yDisp)
+        let visibleBottom = min(displayBuffer.lines.count - 1, displayBuffer.yDisp + terminal.rows - 1)
+        pruneRowDrawCache(visible: visibleTop <= visibleBottom ? visibleTop...visibleBottom : nil)
+
 #if os(macOS)
         // Fills gaps at the end with the default terminal background
         let box = CGRect (x: 0, y: 0, width: bounds.width, height: bounds.height.truncatingRemainder(dividingBy: cellHeight))

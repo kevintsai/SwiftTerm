@@ -264,6 +264,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // Cache for the colors in the 0..255 range
     var colors: [UIColor?] = Array(repeating: nil, count: 256)
     var trueColors: [Attribute.Color:UIColor] = [:]
+
+    // Per-row shaped-draw cache for the CoreText path, keyed by absolute buffer row.
+    // See AppleRowDrawCache.swift — `RowDrawKey` documents what has to match for a hit.
+    var rowDrawCache: [Int: RowDrawCacheEntry] = [:]
+    var rowDrawStyleEpoch: UInt64 = 0
+
     var transparent = TTColor.transparent ()
     private var lastLayoutBounds: CGRect = .zero
     
@@ -1302,7 +1308,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
-    public var useBrightColors: Bool = true
+    public var useBrightColors: Bool = true {
+        didSet { colorsChanged () }
+    }
 
     /// When false, bold text no longer promotes ANSI colors 0-6 to their bright variants (mirrors kitty's
     /// `bold_is_bright no`); explicit bright color codes still render bright. Independent of `useBrightColors`.
@@ -1334,7 +1342,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return _selectedTextBackgroundColor
         }
         set {
+            guard newValue != _selectedTextBackgroundColor else { return }
             _selectedTextBackgroundColor = newValue
+            // See the macOS twin: baked into the attributed string, so it must repaint and drop
+            // the shaped rows.
+            colorsChanged ()
         }
     }
     

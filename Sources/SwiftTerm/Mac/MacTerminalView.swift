@@ -390,6 +390,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     // Cache for the colors in the 0..255 range
     var colors: [NSColor?] = Array(repeating: nil, count: 256)
     var trueColors: [Attribute.Color:NSColor] = [:]
+
+    // Per-row shaped-draw cache for the CoreText path, keyed by absolute buffer row.
+    // See AppleRowDrawCache.swift — `RowDrawKey` documents what has to match for a hit.
+    var rowDrawCache: [Int: RowDrawCacheEntry] = [:]
+    var rowDrawStyleEpoch: UInt64 = 0
+
     var transparent = TTColor.transparent ()
     var isBigSur = true
     
@@ -795,7 +801,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
-    public var useBrightColors: Bool = true
+    public var useBrightColors: Bool = true {
+        didSet { colorsChanged () }
+    }
 
     /// When false, bold text no longer promotes ANSI colors 0-6 to their bright variants (mirrors kitty's
     /// `bold_is_bright no`); explicit bright color codes still render bright. Independent of `useBrightColors`.
@@ -840,7 +848,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             return _selectedTextBackgroundColor
         }
         set {
+            guard newValue != _selectedTextBackgroundColor else { return }
             _selectedTextBackgroundColor = newValue
+            // Baked into every selected row's attributed string, so a change has to repaint —
+            // and, since AppleRowDrawCache.swift, has to drop the shaped rows too. Before this,
+            // setting the colour did nothing until something else happened to dirty those rows.
+            colorsChanged ()
         }
     }
 
