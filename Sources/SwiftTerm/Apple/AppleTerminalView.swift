@@ -1267,6 +1267,20 @@ extension TerminalView {
 
     
     // TODO: this should not render any lines outside the dirtyRect
+    /// The attribute keys the draw loop reads, as `NSString` once instead of per run.
+    ///
+    /// `CTRunGetAttributes` hands back a `CFDictionary`. Spelling that `as? [NSAttributedString.Key: Any]`
+    /// builds a whole native Swift dictionary — every run, every row, every frame — to read at most three
+    /// keys from it; profiling a live pane put `Dictionary._conditionallyBridgeFromObjectiveC` at 11.8% of
+    /// `drawTerminalContents`, more than twice what `CTFontDrawGlyphs` cost. `as NSDictionary` is the
+    /// toll-free cast instead: no copy, and `object(forKey:)` reads what is already there.
+    private static let selectionBackgroundKey = NSAttributedString.Key.selectionBackgroundColor.rawValue as NSString
+    private static let backgroundKey = NSAttributedString.Key.backgroundColor.rawValue as NSString
+    private static let foregroundKey = NSAttributedString.Key.foregroundColor.rawValue as NSString
+    private static let fontKey = NSAttributedString.Key.font.rawValue as NSString
+    private static let underlineStyleKey = NSAttributedString.Key.underlineStyle.rawValue as NSString
+    private static let strikethroughStyleKey = NSAttributedString.Key.strikethroughStyle.rawValue as NSString
+
     func drawTerminalContents (dirtyRect: TTRect, context: CGContext, bufferOffset: Int)
     {
         let lineDescent = CTFontGetDescent(fontSet.normal)
@@ -1424,14 +1438,13 @@ extension TerminalView {
                     if runGlyphsCount == 0 {
                         continue
                     }
-                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
+                    let runAttributes = CTRunGetAttributes(run) as NSDictionary
                     let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
                     let endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
-                    var backgroundColor: TTColor?
-                    if runAttributes.keys.contains(.selectionBackgroundColor) {
-                        backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
-                    } else if runAttributes.keys.contains(.backgroundColor) {
-                        backgroundColor = runAttributes[.backgroundColor] as? TTColor
+                    // One lookup per key, not a `contains` followed by a subscript.
+                    var backgroundColor = runAttributes[Self.selectionBackgroundKey] as? TTColor
+                    if backgroundColor == nil {
+                        backgroundColor = runAttributes[Self.backgroundKey] as? TTColor
                     }
 
                     if let backgroundColor = backgroundColor {
@@ -1523,8 +1536,8 @@ extension TerminalView {
                     if runGlyphsCount == 0 {
                         continue
                     }
-                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
-                    let runFont = runAttributes[.font] as! TTFont
+                    let runAttributes = CTRunGetAttributes(run) as NSDictionary
+                    let runFont = runAttributes[Self.fontKey] as! TTFont
                     let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
 
                     let runGlyphs = [CGGlyph](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
@@ -1544,12 +1557,11 @@ extension TerminalView {
                             y: lineOrigin.y + yOffset + ctPosition.y)
                     }
 
-                    nativeForegroundColor.setFill()
-
-                    if runAttributes.keys.contains(.foregroundColor) {
-                        let color = runAttributes[.foregroundColor] as! TTColor
-                        color.setFill()
-                    }
+                    // Set the fill once. This used to set the native foreground and then, for the runs that
+                    // carry a colour — which is most of them in any coloured TUI — immediately set it again;
+                    // the first one drew nothing. `NSColor.setFill` is not free (it resolves and installs a
+                    // CGColor), and this runs per run, per row, per frame.
+                    ((runAttributes[Self.foregroundKey] as? TTColor) ?? nativeForegroundColor).setFill()
 
                     // Center full-width (CJK) and substituted glyphs within their
                     // multi-cell slot instead of pinning them to the cell's left
@@ -1587,8 +1599,16 @@ extension TerminalView {
                         CTFontDrawGlyphs(runFont, runGlyphs, &glyphPositions, glyphPositions.count, context)
                     }
 
-                    // Draw other attributes (decorations stay grid-aligned)
-                    drawRunAttributes(runAttributes, glyphPositions: positions, in: context)
+                    // Draw other attributes (decorations stay grid-aligned).
+                    //
+                    // `drawRunAttributes` gates everything it does on one of these two keys, so for the
+                    // overwhelming majority of runs — plain text, no underline, no strikethrough — the whole
+                    // call was a save/restore of the graphics state plus a dictionary bridge performed in
+                    // order to discover there was nothing to draw. Ask the two questions first.
+                    if runAttributes[Self.underlineStyleKey] != nil || runAttributes[Self.strikethroughStyleKey] != nil {
+                        drawRunAttributes((runAttributes as? [NSAttributedString.Key: Any]) ?? [:],
+                                          glyphPositions: positions, in: context)
+                    }
 
                     processedGlyphs += runGlyphsCount
                 }
