@@ -710,6 +710,18 @@ extension TerminalView {
         var lastHasUrl = false
         var lastIsSelected = false
 
+        // Read once, not once per column. `customBlockGlyphs` is a `public var` with a `didSet` on an
+        // `open` class, so each read is an accessor call; it was 4.3% of this function on its own.
+        let customGlyphs = customBlockGlyphs
+        let linkContext = linkHighlightContext(row: row)
+
+        // `getAttributes` is a dictionary lookup keyed by `Attribute`, and the loop below already batches
+        // columns that share one. Asking per column — hashing the same key again for every cell of a run —
+        // was 22.4% of this function. Ask when the run changes, reuse the answer while it holds.
+        var lookedUpAttr: Attribute? = nil
+        var lookedUpHasUrl = false
+        var lookedUpResult: [NSAttributedString.Key: Any]? = nil
+
         func flushPending() {
             if !pendingText.isEmpty, let attrs = pendingAttrs {
                 builder?.append(text: pendingText, attributes: attrs)
@@ -721,8 +733,13 @@ extension TerminalView {
             let ch: CharData = line[col]
             let width = max(1, Int(ch.width))
             let attr = ch.attribute
-            let hasUrl = shouldUnderlineLink(row: row, column: col, width: width, cell: ch)
-            guard let attributes = getAttributes(attr, withUrl: hasUrl) else {
+            let hasUrl = shouldUnderlineLink(context: linkContext, column: col, width: width, cell: ch)
+            if attr != lookedUpAttr || hasUrl != lookedUpHasUrl {
+                lookedUpResult = getAttributes(attr, withUrl: hasUrl)
+                lookedUpAttr = attr
+                lookedUpHasUrl = hasUrl
+            }
+            guard let attributes = lookedUpResult else {
                 flushPending()
                 if let finished = builder?.buildIfNeeded() {
                     segments.append(finished)
@@ -766,7 +783,7 @@ extension TerminalView {
 
             // Renders box drawing characters independently of the font
             // U+2500...U+257F
-            if customBlockGlyphs,
+            if customGlyphs,
                ch.code >= BoxDrawingRenderer.lowerBoundary,
                ch.code <= BoxDrawingRenderer.upperBoundary {
                 flushPending()
@@ -780,7 +797,7 @@ extension TerminalView {
                 previousPlaceholderAttribute = nil
             // Renders block elements independently of the font
             // U+2580...U+259F
-            } else if customBlockGlyphs,
+            } else if customGlyphs,
                       (ch.code >= BlockElementMapping.lowerBoundary && ch.code <= BlockElementMapping.upperBoundary),
                       let rects = BlockElementMapping.rects(for: UInt32(ch.code)) {
                 flushPending()
@@ -831,30 +848,41 @@ extension TerminalView {
                             boxDrawings: boxDrawings)
     }
 
-    func shouldUnderlineLink(row: Int, column: Int, width: Int, cell: CharData) -> Bool
+    /// Everything `shouldUnderlineLink` needs that does not depend on the column, resolved once per row.
+    ///
+    /// The predicate is asked per cell, but `linkHighlightMode` and `commandActive` are `public var`s on an
+    /// `open` class — the read is a real accessor call, not a field load — and scanning `linkHighlightRange`
+    /// for this row repeated the same search for every column. Together they were ~5% of
+    /// `buildAttributedString` in a profile, spent almost entirely to answer "no" in the default mode.
+    struct LinkHighlightContext {
+        let mode: LinkHighlightMode
+        let modifierDown: Bool
+        let rowHighlight: Range<Int>?
+    }
+
+    func linkHighlightContext(row: Int) -> LinkHighlightContext {
+        LinkHighlightContext(mode: linkHighlightMode,
+                             modifierDown: commandActive,
+                             rowHighlight: linkHighlightRange?.first(where: { $0.row == row })?.range)
+    }
+
+    func shouldUnderlineLink(context: LinkHighlightContext, column: Int, width: Int, cell: CharData) -> Bool
     {
-        switch linkHighlightMode {
+        switch context.mode {
         case .always:
             return cell.hasPayload
         case .alwaysWithModifier:
-            return commandActive && cell.hasPayload
+            return context.modifierDown && cell.hasPayload
         case .hover:
-            guard let highlights = linkHighlightRange,
-                  let highlight = highlights.first(where: { $0.row == row })
-            else {
+            guard let highlight = context.rowHighlight else {
                 return false
             }
-            let cellRange = column..<(column + width)
-            return highlight.range.overlaps(cellRange)
+            return highlight.overlaps(column..<(column + width))
         case .hoverWithModifier:
-            guard commandActive,
-                  let highlights = linkHighlightRange,
-                  let highlight = highlights.first(where: { $0.row == row })
-            else {
+            guard context.modifierDown, let highlight = context.rowHighlight else {
                 return false
             }
-            let cellRange = column..<(column + width)
-            return highlight.range.overlaps(cellRange)
+            return highlight.overlaps(column..<(column + width))
         }
     }
 

@@ -75,6 +75,31 @@ final class RunDecorationDrawTests {
                 "struck text drew no more ink than plain — the decoration pass was skipped for a run that needed it")
     }
 
+    /// The link-highlight inputs are resolved once per row and handed to the per-cell predicate. Resolving
+    /// them for the wrong row underlines the wrong text, which no timing or ink-count assertion would show:
+    /// the ink is there either way, just on the other line.
+    @Test func aLinkHighlightUnderlinesOnlyItsOwnRow() throws {
+        func inkOnRow(_ highlightRow: Int?) -> Int {
+            let view = makeView()
+            view.terminal.feed(text: "visit example.com now\r\nvisit example.com now\r\n")
+            view.linkHighlightMode = .hoverWithModifier
+            view.commandActive = true
+            if let r = highlightRow {
+                view.linkHighlightRange = [Terminal.LinkMatch.RowRange(row: r, range: 6..<17)]
+            }
+            return inkCount(view)
+        }
+        let none = inkOnRow(nil)
+        let onRowZero = inkOnRow(0)
+        #expect(onRowZero > none, "the premise: highlighting row 0 must draw an underline somewhere")
+
+        // Highlighting row 1 must draw the same amount of extra ink as highlighting row 0 — one underline,
+        // on one row. A context resolved for a fixed row would underline row 0 in both cases, or neither.
+        let onRowOne = inkOnRow(1)
+        #expect(onRowOne > none, "highlighting row 1 drew no underline — the row's highlight was not found")
+        #expect(abs(onRowOne - onRowZero) <= 2, "the two rows carry the same text, so the underline must cost the same ink")
+    }
+
     @Test func aSelectionStillPaintsItsBackground() throws {
         let view = makeView()
         view.terminal.feed(text: "selected text")
