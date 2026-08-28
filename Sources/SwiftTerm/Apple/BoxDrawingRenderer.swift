@@ -82,7 +82,7 @@ struct BoxDrawingRenderer {
                      cellOrigin: CGPoint,
                      cellSize: CGSize,
                      scale: CGFloat,
-                     color: TTColor,
+                     cgColor: CGColor,
                      baseThicknessPx: Int) {
         let cellWidthPx = max(1, Int(round(cellSize.width * scale)))
         let cellHeightPx = max(1, Int(round(cellSize.height * scale)))
@@ -98,8 +98,10 @@ struct BoxDrawingRenderer {
         let lightPx = max(1, max(baseThicknessPx, minStrokePx))
         let heavyPx = max(1, lightPx * 2)
 
-        context.setFillColor(color.cgColor)
-        context.setStrokeColor(color.cgColor)
+        // A `CGColor`, not a `TTColor`: `NSColor.cgColor` allocates, and this runs once per box-drawing
+        // cell. The caller resolves it — see `drawBoxDrawings`.
+        context.setFillColor(cgColor)
+        context.setStrokeColor(cgColor)
 
         switch codePoint {
         case 0x2500: linesChar(lines: Lines(up: .none, right: .light, down: .none, left: .light), canvas: canvas, baseThicknessPx: baseThicknessPx)

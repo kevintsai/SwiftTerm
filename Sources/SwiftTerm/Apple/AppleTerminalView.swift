@@ -1230,20 +1230,35 @@ extension TerminalView {
         let lineOriginPxX = round(lineOrigin.x * scale)
         let lineOriginPxY = round(lineOrigin.y * scale)
 
+        // `NSColor.cgColor` allocates a fresh CGColor every call, and a tagged-pointer colour caches
+        // nothing. The old spelling paid for three of them per cell — one to read `.alpha`, then two more
+        // inside the renderer — while a box-drawn frame is overwhelmingly one colour repeated across the
+        // row. Resolving it once and reusing it while the colour holds removes nearly all of that.
+        //
+        // The clamp it used to apply was a no-op: `resolvedAlpha` was `item.foregroundColor`'s own alpha
+        // clamped to 0...1, fed straight back through `withAlphaComponent`.
+        var memoColor: TTColor?
+        var memoCGColor: CGColor?
+
         for item in items {
             let cellWidthPx = baseCellWidthPx * item.columnWidth
             let cellWidth = CGFloat(cellWidthPx) / scale
             let cellOrigin = CGPoint(x: (lineOriginPxX + CGFloat(item.column * baseCellWidthPx)) / scale,
                                      y: lineOriginPxY / scale)
-            let baseAlpha = item.foregroundColor.cgColor.alpha
-            let resolvedAlpha = max(0, min(1, baseAlpha))
-            let color = item.foregroundColor.withAlphaComponent(resolvedAlpha)
+            let cgColor: CGColor
+            if let memoColor, memoColor == item.foregroundColor, let memoCGColor {
+                cgColor = memoCGColor
+            } else {
+                cgColor = item.foregroundColor.cgColor
+                memoColor = item.foregroundColor
+                memoCGColor = cgColor
+            }
             BoxDrawingRenderer.draw(codePoint: item.codePoint,
                                     in: context,
                                     cellOrigin: cellOrigin,
                                     cellSize: CGSize(width: cellWidth, height: cellHeight),
                                     scale: scale,
-                                    color: color,
+                                    cgColor: cgColor,
                                     baseThicknessPx: baseThicknessPx)
         }
 

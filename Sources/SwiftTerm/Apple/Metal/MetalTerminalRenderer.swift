@@ -1608,7 +1608,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                         cellOrigin: cellOrigin,
                                         cellSize: cellSize,
                                         scale: scale,
-                                        color: TTColor.white,
+                                        cgColor: TTColor.white.cgColor,
                                         baseThicknessPx: baseThicknessPx)
                 return true
             case UInt32(BlockElementMapping.lowerBoundary)...UInt32(BlockElementMapping.upperBoundary):
