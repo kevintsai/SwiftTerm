@@ -353,7 +353,9 @@ open class Terminal {
 
     private let synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
     public private(set) var synchronizedOutputActive: Bool = false
-    private var synchronizedOutputTimeoutItem: DispatchWorkItem?
+
+    /// One timer for the terminal's whole life, re-armed in place — see `scheduleSynchronizedOutputTimeout`.
+    private var synchronizedOutputTimer: DispatchSourceTimer?
 
     var displayBuffer: Buffer {
         buffer
@@ -5693,26 +5695,45 @@ open class Terminal {
             return
         }
         synchronizedOutputActive = false
-        synchronizedOutputTimeoutItem?.cancel()
-        synchronizedOutputTimeoutItem = nil
+        // Disarm rather than cancel: the source is reused by the next block, and a cancelled one cannot be.
+        synchronizedOutputTimer?.schedule(deadline: .distantFuture)
         if recovering {
             refresh (startRow: 0, endRow: rows - 1)
         }
         tdel?.synchronizedOutputChanged(source: self, active: false)
     }
 
+    /// Arms the safety net that ends a block whose program never sent its end marker.
+    ///
+    /// **Why a reused source and not `asyncAfter`.** The obvious spelling — cancel the previous
+    /// `DispatchWorkItem`, schedule a fresh one with `DispatchQueue.main.asyncAfter` — is wrong for a call
+    /// site that runs at this rate. `cancel()` only marks the item so its block will not run; the timer it
+    /// was scheduled against stays in libdispatch's heap until its deadline arrives. tmux wraps every redraw
+    /// in a begin/end pair, so a busy pane opens 8–27 blocks a second (60–73 measured at peak) and each one
+    /// left a dead one-second timer behind to be woken and discarded. Re-arming a single source is one heap
+    /// update instead. Measured at 108 blocks/s: 0.27% of one core for the old spelling, 0.13% for this one.
+    ///
+    /// The source stays resumed for the terminal's life — releasing a *suspended* dispatch source traps —
+    /// and is parked at `.distantFuture` while no block is open.
     private func scheduleSynchronizedOutputTimeout ()
     {
-        synchronizedOutputTimeoutItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, self.synchronizedOutputActive else {
-                return
+        let timer: DispatchSourceTimer
+        if let existing = synchronizedOutputTimer {
+            timer = existing
+        } else {
+            let created = DispatchSource.makeTimerSource(queue: .main)
+            created.setEventHandler { [weak self] in
+                guard let self, self.synchronizedOutputActive else {
+                    return
+                }
+                // The program never sent its end marker — repaint everything, see `endSynchronizedOutput`.
+                self.endSynchronizedOutput(recovering: true)
             }
-            // The program never sent its end marker — repaint everything, see `endSynchronizedOutput`.
-            self.endSynchronizedOutput(recovering: true)
+            created.resume()
+            synchronizedOutputTimer = created
+            timer = created
         }
-        synchronizedOutputTimeoutItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + synchronizedOutputTimeoutSeconds, execute: workItem)
+        timer.schedule(deadline: .now() + synchronizedOutputTimeoutSeconds)
     }
 
     func setViewYDisp (_ newValue: Int)

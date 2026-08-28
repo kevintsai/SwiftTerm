@@ -102,6 +102,30 @@ final class SyncDirtyRangeTests: XCTestCase {
         XCTAssertEqual(r?.endY, 23, "recovery repaints every row, exactly as before")
     }
 
+    /// The safety net is one timer reused for the terminal's whole life, parked at `.distantFuture` between
+    /// blocks rather than cancelled. A cancelled dispatch source cannot be re-armed, so getting that wrong
+    /// disarms the net permanently — and silently, because the *first* block still recovers. This opens and
+    /// closes a block first, so the timer under test is a reused one.
+    func testTheSafetyTimeoutFiresForABlockOpenedAfterAnEarlierOneClosed() {
+        let (terminal, watcher) = makeTerminal(rows: 24)
+        terminal.feed(text: "\(bsu)\(esc)[1;1Hfirst frame\(esu)")   // a complete block: parks the timer
+        XCTAssertFalse(terminal.synchronizedOutputActive)
+        XCTAssertEqual(watcher.framesEnded.count, 1)
+
+        terminal.feed(text: "\(bsu)\(esc)[3;1Hhalf an update")       // begins, never ends
+        XCTAssertTrue(terminal.synchronizedOutputActive)
+
+        let deadline = Date().addingTimeInterval(2.5)
+        while terminal.synchronizedOutputActive, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertFalse(terminal.synchronizedOutputActive, "the reused safety timer must still fire")
+
+        XCTAssertEqual(watcher.framesEnded.count, 2)
+        XCTAssertEqual(watcher.framesEnded[1]?.startY, 0)
+        XCTAssertEqual(watcher.framesEnded[1]?.endY, 23, "recovery repaints every row")
+    }
+
     /// Real bytes: `tmux -T sync attach` to a pane running btop at 200x50, captured 2026-08-25.
     func testThroughTmuxSyncCorpusRepaintsOnlyWhatChanged() throws {
         let url = URL(fileURLWithPath: #filePath)
