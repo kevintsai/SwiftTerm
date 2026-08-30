@@ -2082,6 +2082,10 @@ extension TerminalView {
                 value = 0x1c
             case "_":
                 value = 0x1f
+            // Control+/ has no ASCII derivation (0x2f & 0x1f would be ^O); xterm and every
+            // terminal that copies it map it to US (0x1f), which is what apps read as <C-_>.
+            case "/":
+                value = 0x1f
             case "]":
                 value = 0x1d
             case "[":
