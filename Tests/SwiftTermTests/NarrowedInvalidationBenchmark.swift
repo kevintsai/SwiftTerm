@@ -128,7 +128,9 @@ final class NarrowedInvalidationBenchmark: XCTestCase {
     func testWhatNarrowingIsWorth() throws {
         guard ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_BENCH"] == "1" else { return }
         for (label, fixture, cols, rows) in [
-            ("spinner（等待中的 agent）", "synthetic:66", 177, 66),
+            (ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_CORPUS"] != nil ? "實機錄音" : "spinner（等待中的 agent）", "synthetic:66",
+             Int(ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_COLS"] ?? "") ?? 177,
+             Int(ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_ROWS"] ?? "") ?? 66),
             ("btop（密集 TUI，最壞情況）", "btop-through-tmux-sync.raw", 200, 50),
         ] {
             var before: [Double] = []

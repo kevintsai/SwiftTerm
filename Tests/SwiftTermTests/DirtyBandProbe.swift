@@ -73,7 +73,9 @@ final class DirtyBandProbe: XCTestCase {
         guard ProcessInfo.processInfo.environment["SWIFTTERM_DIRTYBAND_PROBE"] == "1" else { return }
 
         for (label, fixture, cols, rows) in [
-            ("spinner (claude 等待中)", "synthetic:66", 177, 66),
+            (ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_CORPUS"] != nil ? "實機錄音" : "spinner (claude 等待中)", "synthetic:66",
+             Int(ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_COLS"] ?? "") ?? 177,
+             Int(ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_ROWS"] ?? "") ?? 66),
             ("btop", "btop-through-tmux-sync.raw", 200, 50),
         ] {
             let (terminal, _) = TerminalTestHarness.makeTerminal(cols: cols, rows: rows)
