@@ -269,6 +269,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // See AppleRowDrawCache.swift — `RowDrawKey` documents what has to match for a hit.
     var rowDrawCache: [Int: RowDrawCacheEntry] = [:]
     var rowDrawStyleEpoch: UInt64 = 0
+    /// See the macOS declaration — kept in step so the shared draw code has one shape.
+    var rowsOnScreen: [Int: RowOnScreen] = [:]
 
     var transparent = TTColor.transparent ()
     private var lastLayoutBounds: CGRect = .zero

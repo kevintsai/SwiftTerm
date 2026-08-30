@@ -396,6 +396,19 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     var rowDrawCache: [Int: RowDrawCacheEntry] = [:]
     var rowDrawStyleEpoch: UInt64 = 0
 
+    /// Ask AppKit only for the rows whose pixels would differ, instead of the whole dirty band
+    /// (`visuallyChangedRowBand`). On = the shipping behaviour.
+    ///
+    /// The one reason this is a switch and not a constant: `NarrowedInvalidationRenderTests` needs a
+    /// **control arm**. That test emulates a backing store by repainting only the invalidated rect into a
+    /// persistent bitmap, and a green result would mean nothing if the emulation itself were wrong. So it
+    /// runs the same corpus twice — narrowing off, then on — and both must equal a cold full render.
+    var narrowsInvalidationToChangedRows = true
+
+    /// What the backing store is known to hold, per SCREEN row. Written only for rows a draw painted in
+    /// full; read by `visuallyChangedRowBand`. See `noteRowsOnScreen`.
+    var rowsOnScreen: [Int: RowOnScreen] = [:]
+
     var transparent = TTColor.transparent ()
     var isBigSur = true
     

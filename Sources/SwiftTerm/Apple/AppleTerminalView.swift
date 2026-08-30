@@ -1730,6 +1730,21 @@ extension TerminalView {
         let visibleBottom = min(displayBuffer.lines.count - 1, displayBuffer.yDisp + terminal.rows - 1)
         pruneRowDrawCache(visible: visibleTop <= visibleBottom ? visibleTop...visibleBottom : nil)
 
+        // Rows whose whole cell height landed inside what we were asked to paint are now on screen; a row
+        // clipped at the boundary was shaped but not (fully) painted, so it is deliberately not recorded.
+        var paintedTop = Int.max
+        var paintedBottom = -1
+        for row in max(firstRow, 0)...max(lastRow, 0) where row < displayBuffer.lines.count {
+            let top = frame.height - calcLineOffset(forRow: row)
+            if top >= dirtyRect.minY - 0.001, top + cellDimension.height <= dirtyRect.maxY + 0.001 {
+                paintedTop = min(paintedTop, row)
+                paintedBottom = max(paintedBottom, row)
+            }
+        }
+        if paintedBottom >= paintedTop {
+            noteRowsOnScreen(rows: paintedTop...paintedBottom, bufferOffset: bufferOffset)
+        }
+
 #if os(macOS)
         // Fills gaps at the end with the default terminal background
         let box = CGRect (x: 0, y: 0, width: bounds.width, height: bounds.height.truncatingRemainder(dividingBy: cellHeight))
@@ -1839,15 +1854,39 @@ extension TerminalView {
         terminal.clearUpdateRange ()
 
         #if os(macOS)
+        // The band `getUpdateRange()` returns spans everything the cursor flew over, not what changed
+        // (see `visuallyChangedRowBand`). Ask only for the rows whose pixels would differ; on a waiting
+        // agent's pane that is ~3 rows instead of 65. `nil` = this frame changes nothing visible, so
+        // there is nothing to ask for at all.
+        //
+        // CoreText path only: the Metal renderer keeps its own `metalDirtyRange` and its own per-line
+        // cache, and this is not its bottleneck.
+        var paintStart = rowStart
+        var paintEnd = rowEnd
+        var nothingChanged = false
+        #if canImport(MetalKit)
+        let coreTextPath = metalView == nil
+        #else
+        let coreTextPath = true
+        #endif
+        if coreTextPath && narrowsInvalidationToChangedRows {
+            if let narrowed = visuallyChangedRowBand(rowStart: rowStart, rowEnd: rowEnd) {
+                paintStart = narrowed.lowerBound
+                paintEnd = narrowed.upperBound
+            } else {
+                nothingChanged = true
+            }
+        }
+
         let baseLine = frame.height
         var region = CGRect (x: 0,
-                             y: baseLine - (cellDimension.height + CGFloat(rowEnd) * cellDimension.height),
+                             y: baseLine - (cellDimension.height + CGFloat(paintEnd) * cellDimension.height),
                              width: frame.width,
-                             height: CGFloat(rowEnd-rowStart + 1) * cellDimension.height)
+                             height: CGFloat(paintEnd-paintStart + 1) * cellDimension.height)
         
         // If we are the last line, we should also queue a refresh for the "remaining" bits at the
         // end which can be redrawn by large unicode
-        if rowEnd == terminal.rows - 1 {
+        if paintEnd == terminal.rows - 1 {
             let oh = region.height
             let oy = region.origin.y
             region = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
@@ -1890,10 +1929,10 @@ extension TerminalView {
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
         } else {
-            setNeedsDisplay(region)
+            if !nothingChanged { setNeedsDisplay(region) }
         }
 #else
-        setNeedsDisplay(region)
+        if !nothingChanged { setNeedsDisplay(region) }
 #endif
         #else
         // TODO iOS: need to update the code above, but will do that when I get some real

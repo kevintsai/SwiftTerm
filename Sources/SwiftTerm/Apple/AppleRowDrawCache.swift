@@ -84,6 +84,12 @@ struct PreparedRowSegment {
     let runs: [CTRun]
 }
 
+/// What is currently painted at one screen row. See ``TerminalView/noteRowsOnScreen(rows:bufferOffset:)``.
+struct RowOnScreen {
+    let lineRef: BufferLine
+    let key: RowDrawKey
+}
+
 /// What one row costs to produce, kept so the next frame does not produce it again.
 struct RowDrawCacheEntry {
     /// The `BufferLine` this was built from.
@@ -134,13 +140,20 @@ extension TerminalView {
     /// `row` is an absolute buffer index, which is also the cache key — `buildAttributedString` takes
     /// `row` too (kitty placeholders encode it), so a cached entry is only ever valid for the row it
     /// was built at.
+    /// Everything one row's appearance depends on, as one comparable value. The single definition —
+    /// the shaping cache, the on-screen record and the invalidation predicate all key on this, so there
+    /// is no way for them to disagree about what "changed" means.
+    func rowDrawKey(row: Int, line: BufferLine, cols: Int) -> RowDrawKey {
+        RowDrawKey(generation: line.generation,
+                   cols: cols,
+                   selection: selectedColumnsRange(row: row, cols: cols),
+                   link: rowLinkSignature(row: row),
+                   customBlockGlyphs: customBlockGlyphs,
+                   styleEpoch: rowDrawStyleEpoch)
+    }
+
     func rowDrawState(row: Int, line: BufferLine, cols: Int) -> (info: ViewLineInfo, prepared: [PreparedRowSegment]) {
-        let key = RowDrawKey(generation: line.generation,
-                             cols: cols,
-                             selection: selectedColumnsRange(row: row, cols: cols),
-                             link: rowLinkSignature(row: row),
-                             customBlockGlyphs: customBlockGlyphs,
-                             styleEpoch: rowDrawStyleEpoch)
+        let key = rowDrawKey(row: row, line: line, cols: cols)
         if let hit = rowDrawCache[row], hit.lineRef === line, hit.key == key {
             return (hit.info, hit.prepared)
         }
@@ -169,6 +182,72 @@ extension TerminalView {
             return
         }
         rowDrawCache = rowDrawCache.filter { visible.contains($0.key) }
+    }
+
+    /// The rows inside a dirty band that would actually put different pixels on screen, as one range of
+    /// **screen** rows — or nil when none of them would.
+    ///
+    /// `getUpdateRange()` hands back ONE contiguous range, and moving the cursor marks every row between
+    /// its old and new position (`SyncDirtyRangeTests` pins that). A tmux frame that changes one spinner
+    /// glyph therefore arrives as a band spanning everything the cursor flew over — measured on real
+    /// captures: 65 rows of band for 2.6 rows of change (`DirtyBandProbe`). The view then clears and
+    /// repaints that whole band, and clearing plus the CoreAnimation backing-store update that follows
+    /// scale with AREA, not with how many cells differ.
+    ///
+    /// The predicate here is deliberately **the same one the draw path uses** — a `rowDrawCache` hit
+    /// (same line, same key) — rather than a second, parallel notion of "changed" that could drift from
+    /// it. A row with no cache entry counts as changed: no entry means no evidence its pixels are on
+    /// screen (it may never have been drawn, or have been pruned).
+    ///
+    /// This narrows what we ASK for. It does **not** let the draw path skip rows inside the rect it is
+    /// given: whatever AppKit hands `drawTerminalContents` is still cleared and repainted in full. That
+    /// is what keeps this free of the ghosting class of bug — if the backing store is lost, or anything
+    /// else invalidates us, AppKit asks for a bigger rect and every row in it is redrawn.
+    func visuallyChangedRowBand(rowStart: Int, rowEnd: Int) -> ClosedRange<Int>? {
+        let buffer = terminal.displayBuffer
+        let cols = buffer.cols
+        var lo = Int.max
+        var hi = -1
+        for y in rowStart...rowEnd {
+            let absolute = buffer.yDisp + y
+            // Out of the buffer entirely → we cannot reason about it; repaint the band as before.
+            guard absolute >= 0, absolute < buffer.lines.count else { return rowStart...rowEnd }
+            let line = buffer.lines[absolute]
+            if let onScreen = rowsOnScreen[y], onScreen.lineRef === line,
+               onScreen.key == rowDrawKey(row: absolute, line: line, cols: cols) {
+                continue
+            }
+            lo = min(lo, y)
+            hi = max(hi, y)
+        }
+        guard hi >= lo else { return nil }
+        // Pad by a row on each side. Glyphs are not confined to their cell — a descender from the row
+        // above reaches down into this one, and clearing this row erases it. The existing code already
+        // extends the band one cell down for the same reason; narrowing makes the top edge matter too.
+        return max(0, lo - 1)...min(terminal.rows - 1, hi + 1)
+    }
+
+    /// Record what the backing store now holds, for the rows a draw painted **in full**.
+    ///
+    /// Keyed by SCREEN row, which is the coordinate pixels actually live at — so scrolling invalidates
+    /// itself: after the display moves, screen row 5 holds a different `BufferLine`, the identity check
+    /// fails, and the row is repainted.
+    ///
+    /// Why this is not just `rowDrawCache`: that table answers "have we shaped this row before", and
+    /// `drawTerminalContents` shapes every row that *intersects* the dirty rect — including a boundary
+    /// row whose pixels are then clipped away. Reading it as "these pixels are on screen" left exactly
+    /// those clipped rows stale (`NarrowedInvalidationRenderTests` on the btop corpus). Two questions,
+    /// two records; they share the key so they cannot disagree about what changed.
+    func noteRowsOnScreen(rows: ClosedRange<Int>, bufferOffset: Int) {
+        for absolute in rows {
+            guard let entry = rowDrawCache[absolute] else { continue }
+            rowsOnScreen[absolute - bufferOffset] = RowOnScreen(lineRef: entry.lineRef, key: entry.key)
+        }
+    }
+
+    /// Nothing on screen can be vouched for any more (the view is about to redraw from scratch).
+    func forgetRowsOnScreen() {
+        rowsOnScreen.removeAll(keepingCapacity: true)
     }
 
     // MARK: - test seam
