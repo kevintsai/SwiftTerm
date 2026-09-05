@@ -284,6 +284,15 @@ public protocol TerminalImage {
     
     /// Column where the image was attached
     var col: Int { get set }
+
+    /// How many cells this slice covers horizontally, counting from ``col``.  Zero means the span
+    /// is unknown, and whoever decides whether text has landed on top of the picture must then
+    /// assume the slice reaches the end of the line.
+    var colSpan: Int { get }
+}
+
+public extension TerminalImage {
+    var colSpan: Int { 0 }
 }
 
 /**
@@ -2419,10 +2428,12 @@ open class Terminal {
         case 0:
             j = buffer.y
             updateRange (j)
-            eraseInBufferLine (y: j, start: buffer.x, end: cols, clearWrap: buffer.x == 0)
+            // Erasing to the end of the screen takes the pictures on those rows with it, the way
+            // tmux does it for its own copy (image_check_line from screen_write_clearendofscreen).
+            eraseInBufferLine (y: j, start: buffer.x, end: cols, clearWrap: buffer.x == 0, clearImages: true)
             j += 1
             while j < rows {
-                resetBufferLine (y: j)
+                resetBufferLine (y: j, clearImages: true)
                 j += 1
             }
             updateRange (j - 1)
@@ -2431,14 +2442,14 @@ open class Terminal {
             j = buffer.y
             updateRange (j)
             // Deleted front part of line and everything before. This line will no longer be wrapped.
-            eraseInBufferLine (y: j, start: 0, end: buffer.x + 1, clearWrap: true)
+            eraseInBufferLine (y: j, start: 0, end: buffer.x + 1, clearWrap: true, clearImages: true)
             if buffer.x + 1 >= cols {
                 // Deleted entire previous line. This next line can no longer be wrapped.
                 buffer.lines [j + 1].isWrapped = false
             }
             while (j != 0) {
                 j -= 1
-                resetBufferLine (y: j)
+                resetBufferLine (y: j, clearImages: true)
             }
             updateRange (0)
         case 2:

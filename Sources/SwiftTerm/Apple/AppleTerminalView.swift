@@ -2424,6 +2424,7 @@ extension TerminalView {
         var pixelWidth: Int
         var pixelHeight: Int
         var col: Int
+        var colSpan: Int
         var kittyIsKitty: Bool = false
         var kittyImageId: UInt32?
         var kittyImageNumber: UInt32?
@@ -2436,11 +2437,12 @@ extension TerminalView {
         var kittyPixelOffsetX: Int = 0
         var kittyPixelOffsetY: Int = 0
         
-        init (image: TTImage, width: Int, height: Int, onCol: Int) {
+        init (image: TTImage, width: Int, height: Int, onCol: Int, cellsWide: Int) {
             self.image = image
             self.pixelWidth = width
             self.pixelHeight = height
             self.col = onCol
+            self.colSpan = cellsWide
         }
     }
     // Computes the number of columns and rows used by the image
@@ -2601,7 +2603,7 @@ extension TerminalView {
             srcY += cellDimension.height * heightRatio
             #endif
             
-            let attachedImage = AppleImage (image: stripe, width: Int (stripeSize.width), height: Int (cellDimension.height), onCol: terminal.buffer.x)
+            let attachedImage = AppleImage (image: stripe, width: Int (stripeSize.width), height: Int (cellDimension.height), onCol: terminal.buffer.x, cellsWide: cols)
             if let context = placementContext {
                 attachedImage.kittyIsKitty = true
                 attachedImage.kittyImageId = context.imageId

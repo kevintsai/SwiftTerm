@@ -237,6 +237,43 @@ public final class Buffer {
         }
     }
 
+    /// Drops the image slices on a line that the cells in `start...end` sit on top of.
+    ///
+    /// A sixel (or iTerm2) picture lives *in* the cells it was painted over, so printing text there
+    /// takes the picture with it - that is what a producer relies on when it "erases" an image by
+    /// writing spaces over it, and it is the same rule tmux applies to its own copy
+    /// (`image_check_area` from `screen_write_collect_end`).  Erase operations - EL, ECH - are
+    /// deliberately *not* callers: tmux repaints a pane by clearing each row's tail long after it
+    /// has drawn the picture there, so honouring those would wipe every image the moment it arrived.
+    ///
+    /// Kitty placements are exempt: those belong to the graphics protocol and only its delete
+    /// command retires them.
+    func eraseImages(coveringLineAt index: Int, from start: Int, to end: Int) {
+        guard _linesWithImagesCount > 0, index >= 0, index < lines.count else {
+            return
+        }
+        let line = lines[index]
+        guard let images = line.images, !images.isEmpty else {
+            return
+        }
+        let kept = images.filter { image in
+            if let placement = image as? KittyPlacementImage, placement.kittyIsKitty {
+                return true
+            }
+            let imageStart = image.col
+            let imageEnd = image.colSpan > 0 ? image.col + image.colSpan - 1 : Int.max
+            return end < imageStart || start > imageEnd
+        }
+        if kept.count == images.count {
+            return
+        }
+        if kept.isEmpty {
+            clearImagesFromLine(at: index)
+        } else {
+            line.images = kept
+        }
+    }
+
     /// Recalculates the count of lines with images (used after reflow operations)
     func recalculateLinesWithImagesCount() {
         var count = 0
@@ -1177,6 +1214,7 @@ public final class Buffer {
             for i in 0..<runLen {
                 row[_x + i] = CharData(attribute: attribute, code: Int32(bytes[idx + i]), size: 1)
             }
+            eraseImages(coveringLineAt: _y + _yBase, from: _x, to: _x + runLen - 1)
             _x += runLen
             consumed += runLen
             idx += runLen
@@ -1243,6 +1281,7 @@ public final class Buffer {
         if _x >= _cols {
             _x = _cols-1
         }
+        let writtenFrom = _x
         bufferRow[_x] = charData
         _x += 1
 
@@ -1258,6 +1297,7 @@ public final class Buffer {
                 chWidth -= 1
             }
         }
+        eraseImages(coveringLineAt: _y + _yBase, from: writtenFrom, to: _x - 1)
         
     }
     
