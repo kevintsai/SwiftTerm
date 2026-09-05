@@ -289,10 +289,17 @@ public protocol TerminalImage {
     /// is unknown, and whoever decides whether text has landed on top of the picture must then
     /// assume the slice reaches the end of the line.
     var colSpan: Int { get }
+
+    /// Which picture this slice belongs to.  One image is attached as a slice per line it covers,
+    /// but it is still one picture: text landing on any of its cells retires all of it, which is
+    /// what tmux does with its own copy (`image_free` from `image_check_area`).  Zero means the
+    /// slice stands alone.
+    var imageGroupId: Int { get }
 }
 
 public extension TerminalImage {
     var colSpan: Int { 0 }
+    var imageGroupId: Int { 0 }
 }
 
 /**

@@ -17,10 +17,12 @@ private final class ProbeImage: TerminalImage {
     var pixelHeight: Int
     var col: Int
     var colSpan: Int
+    var imageGroupId: Int
 
-    init(col: Int, colSpan: Int, pixelWidth: Int = 360, pixelHeight: Int = 20) {
+    init(col: Int, colSpan: Int, groupId: Int = 0, pixelWidth: Int = 360, pixelHeight: Int = 20) {
         self.col = col
         self.colSpan = colSpan
+        self.imageGroupId = groupId
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
     }
@@ -31,6 +33,7 @@ private final class ProbeKittyImage: TerminalImage, KittyPlacementImage {
     var pixelHeight: Int = 20
     var col: Int
     var colSpan: Int
+    var imageGroupId: Int = 0
     var kittyIsKitty: Bool = true
     var kittyImageId: UInt32? = 7
     var kittyImageNumber: UInt32?
@@ -54,11 +57,11 @@ final class ImageOverwriteTests: TerminalDelegate {
 
     /// A terminal holding one 36-cell wide picture slice on each of rows 1...13, starting at column
     /// 63 - the shape yazi's preview pane produces in a 100x30 pane.
-    private func terminalWithPreviewImage(kitty: Bool = false) -> Terminal {
+    private func terminalWithPreviewImage(kitty: Bool = false, groupId: Int = 77) -> Terminal {
         let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 100, rows: 30))
         for row in 1...13 {
             let image: TerminalImage = kitty ? ProbeKittyImage(col: 63, colSpan: 36)
-                                             : ProbeImage(col: 63, colSpan: 36)
+                                             : ProbeImage(col: 63, colSpan: 36, groupId: groupId)
             terminal.buffer.attachImage(image, toLineAt: terminal.buffer.yBase + row)
         }
         return terminal
@@ -140,6 +143,27 @@ final class ImageOverwriteTests: TerminalDelegate {
         feedYaziErase(terminal)
 
         #expect(rowsWithImages(terminal) == Array(1...13))
+    }
+
+    /// The producer decides how much of its picture to overwrite - tmux only forwards the cells that
+    /// changed, so a preview whose replacement has blank lines gets written over on some of its rows
+    /// and not others. One picture goes as a whole or the rest of it stands there for good.
+    @Test func testWritingOnOneRowRetiresTheWholePicture() {
+        let terminal = terminalWithPreviewImage()
+
+        terminal.feed(text: "\u{1b}[6;70H    ")
+
+        #expect(rowsWithImages(terminal).isEmpty)
+    }
+
+    @Test func testWritingOnOneRowLeavesAnUnrelatedPictureAlone() {
+        let terminal = terminalWithPreviewImage(groupId: 77)
+        terminal.buffer.attachImage(ProbeImage(col: 0, colSpan: 20, groupId: 78),
+                                    toLineAt: terminal.buffer.yBase + 20)
+
+        terminal.feed(text: "\u{1b}[6;70H    ")
+
+        #expect(rowsWithImages(terminal) == [20])
     }
 
     @Test func testEraseInDisplayToEndDropsThePicturesItCovers() {

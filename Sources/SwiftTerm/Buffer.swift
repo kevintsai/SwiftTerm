@@ -252,18 +252,47 @@ public final class Buffer {
         guard _linesWithImagesCount > 0, index >= 0, index < lines.count else {
             return
         }
-        let line = lines[index]
-        guard let images = line.images, !images.isEmpty else {
+        guard let images = lines[index].images, !images.isEmpty else {
             return
         }
-        let kept = images.filter { image in
+        var hit: [TerminalImage] = []
+        for image in images {
             if let placement = image as? KittyPlacementImage, placement.kittyIsKitty {
-                return true
+                continue
             }
             let imageStart = image.col
             let imageEnd = image.colSpan > 0 ? image.col + image.colSpan - 1 : Int.max
-            return end < imageStart || start > imageEnd
+            if end >= imageStart && start <= imageEnd {
+                hit.append(image)
+            }
         }
+        if hit.isEmpty {
+            return
+        }
+        // One picture is attached as a slice per line it covers, so retiring only the slices under
+        // this write would leave the rest of the picture standing on the rows the producer happened
+        // not to touch - and a producer does not repaint what it believes it already erased.
+        let groups = Set(hit.map { $0.imageGroupId }.filter { $0 != 0 })
+        if groups.isEmpty {
+            drop(fromLineAt: index) { image in hit.contains { $0 as AnyObject === image as AnyObject } }
+            return
+        }
+        for i in 0..<lines.count {
+            guard lines[i].images != nil else { continue }
+            drop(fromLineAt: i) { image in groups.contains(image.imageGroupId) }
+            if _linesWithImagesCount == 0 {
+                break
+            }
+        }
+    }
+
+    /// Remove the slices a predicate selects from one line, keeping the line-with-images count honest.
+    private func drop(fromLineAt index: Int, where shouldDrop: (TerminalImage) -> Bool) {
+        let line = lines[index]
+        guard let images = line.images else {
+            return
+        }
+        let kept = images.filter { !shouldDrop($0) }
         if kept.count == images.count {
             return
         }

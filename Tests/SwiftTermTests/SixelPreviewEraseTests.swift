@@ -37,9 +37,9 @@ final class SixelPreviewEraseTests {
         return [UInt8](try Data(contentsOf: url))
     }
 
-    /// The rows yazi wrote its preview onto, and the ones it later writes spaces over.  How far the
-    /// picture reaches below them depends on this view's cell height, which is a property of the
-    /// test font rather than of the capture - so the assertions stay on the rows yazi addressed.
+    /// The rows yazi addressed when it drew the preview and again when it erased it.  How far the
+    /// picture reaches below them depends on this view's cell height, a property of the test font
+    /// rather than of the capture - and those extra rows go too, because one picture goes as a whole.
     private static let previewRows = Array(1...13)
 
     @Test func testPreviewSurvivesTheRepaintAndGoesWhenYaziErasesIt() throws {
@@ -53,9 +53,8 @@ final class SixelPreviewEraseTests {
                 "the sixel preview must still be on screen after tmux repaints around it")
 
         view.feed(byteArray: bytes[Self.eraseStartsAt...])
-        let left = Set(rowsWithImages(view.getTerminal()))
-        #expect(Self.previewRows.allSatisfy { !left.contains($0) },
-                "moving off the image erases the preview cells, which takes the picture with them")
+        #expect(rowsWithImages(view.getTerminal()).isEmpty,
+                "moving off the image erases the preview cells, which takes the whole picture with them")
     }
 }
 #endif

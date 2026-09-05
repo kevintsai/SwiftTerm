@@ -19,6 +19,11 @@ import SwiftUI
 
 let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle")
 
+/// Hands out the id that ties one picture's per-line slices together. Monotonic and never reused
+/// in a run, so a slice left behind by a torn-down view can never be taken for a live one.
+/// Only ever touched while attaching an image, which happens on the thread that feeds the view.
+var lastImageGroupId = 0
+
 #if os(iOS) || os(visionOS)
 import UIKit
 typealias TTColor = UIColor
@@ -2425,6 +2430,7 @@ extension TerminalView {
         var pixelHeight: Int
         var col: Int
         var colSpan: Int
+        var imageGroupId: Int
         var kittyIsKitty: Bool = false
         var kittyImageId: UInt32?
         var kittyImageNumber: UInt32?
@@ -2437,12 +2443,13 @@ extension TerminalView {
         var kittyPixelOffsetX: Int = 0
         var kittyPixelOffsetY: Int = 0
         
-        init (image: TTImage, width: Int, height: Int, onCol: Int, cellsWide: Int) {
+        init (image: TTImage, width: Int, height: Int, onCol: Int, cellsWide: Int, groupId: Int) {
             self.image = image
             self.pixelWidth = width
             self.pixelHeight = height
             self.col = onCol
             self.colSpan = cellsWide
+            self.imageGroupId = groupId
         }
     }
     // Computes the number of columns and rows used by the image
@@ -2583,6 +2590,9 @@ extension TerminalView {
                                             isVirtual: false)
         }
         
+        // Every slice below is one picture; the id is what lets an overwrite retire all of it.
+        lastImageGroupId += 1
+        let groupId = lastImageGroupId
         let stripeSize = CGSize (width: width, height: cellDimension.height)
         var didScroll = false
         #if os(iOS) || os(visionOS)
@@ -2603,7 +2613,7 @@ extension TerminalView {
             srcY += cellDimension.height * heightRatio
             #endif
             
-            let attachedImage = AppleImage (image: stripe, width: Int (stripeSize.width), height: Int (cellDimension.height), onCol: terminal.buffer.x, cellsWide: cols)
+            let attachedImage = AppleImage (image: stripe, width: Int (stripeSize.width), height: Int (cellDimension.height), onCol: terminal.buffer.x, cellsWide: cols, groupId: groupId)
             if let context = placementContext {
                 attachedImage.kittyIsKitty = true
                 attachedImage.kittyImageId = context.imageId
@@ -2690,3 +2700,4 @@ extension TerminalView {
 #endif
 
 #endif
+
