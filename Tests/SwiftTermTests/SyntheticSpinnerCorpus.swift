@@ -36,4 +36,24 @@ enum SyntheticSpinnerCorpus {
             return Array(s.utf8)
         }
     }
+
+    /// The shape a full-screen agent TUI actually produces: **two separated regions change every frame** —
+    /// a line lands in the transcript near the top, and the status/spinner line at the bottom ticks — with
+    /// nothing in between changing. One `setNeedsDisplay` cannot express that: the band it forms is the
+    /// whole pane. Measured in the field (fleetmux, 2026-09-09): a 66-row pane repainting 66 rows,
+    /// 9–12 times a second, while the row cache said most rows had not changed.
+    static func twoEndsFrames(count: Int = 80, rows: Int = 66) -> [[UInt8]] {
+        let glyphs = ["✳", "✢", "✶", "✻", "✽", "⏺"]
+        return (0..<count).map { i in
+            let top = 3
+            let bottom = max(rows - 2, 1)
+            var s = "\u{1b}[?2026h\u{1b}[?25l"
+            s += "\u{1b}[\(top);1H"                        // a new transcript line near the top
+            s += "\u{1b}[38;5;110mline \(i) …\u{1b}[39m"
+            s += "\u{1b}[\(bottom);1H"                     // and the status line at the bottom
+            s += "\u{1b}[38;5;174m\(glyphs[i % glyphs.count]) working\u{1b}[39m"
+            s += "\u{1b}[?25h\u{1b}[?2026l"
+            return Array(s.utf8)
+        }
+    }
 }

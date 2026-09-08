@@ -1866,8 +1866,7 @@ extension TerminalView {
         //
         // CoreText path only: the Metal renderer keeps its own `metalDirtyRange` and its own per-line
         // cache, and this is not its bottleneck.
-        var paintStart = rowStart
-        var paintEnd = rowEnd
+        var paintRuns: [ClosedRange<Int>] = [rowStart...rowEnd]
         var nothingChanged = false
         #if canImport(MetalKit)
         let coreTextPath = metalView == nil
@@ -1875,34 +1874,51 @@ extension TerminalView {
         let coreTextPath = true
         #endif
         if coreTextPath && narrowsInvalidationToChangedRows {
-            if let narrowed = visuallyChangedRowBand(rowStart: rowStart, rowEnd: rowEnd) {
-                paintStart = narrowed.lowerBound
-                paintEnd = narrowed.upperBound
+            // **One rect per run of changed rows, not one band across all of them.** A full-screen TUI
+            // touches its top and its bottom in the same frame, so the band between them is the whole
+            // pane — measured in the field (fleetmux, 2026-09-09): 66 of 66 rows repainted 9–12 times a
+            // second while the row cache said most of those rows had not changed. `splitsInvalidationIntoRuns`
+            // exists so the benchmark can run both arms; `visuallyChangedRowBand` is the collapsed answer.
+            if splitsInvalidationIntoRuns {
+                if let runs = visuallyChangedRowRuns(rowStart: rowStart, rowEnd: rowEnd) {
+                    paintRuns = runs
+                } else {
+                    nothingChanged = true
+                }
+            } else if let narrowed = visuallyChangedRowBand(rowStart: rowStart, rowEnd: rowEnd) {
+                paintRuns = [narrowed]
             } else {
                 nothingChanged = true
             }
         }
 
         let baseLine = frame.height
-        var region = CGRect (x: 0,
-                             y: baseLine - (cellDimension.height + CGFloat(paintEnd) * cellDimension.height),
-                             width: frame.width,
-                             height: CGFloat(paintEnd-paintStart + 1) * cellDimension.height)
-        
-        // If we are the last line, we should also queue a refresh for the "remaining" bits at the
-        // end which can be redrawn by large unicode
-        if paintEnd == terminal.rows - 1 {
-            let oh = region.height
-            let oy = region.origin.y
-            region = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
-        } else {
-            // Region ends mid-screen (a restricted DECSTBM region): extend the
-            // invalidation down by one cell so the sub-cell remainder just below the
-            // band's bottom row (descenders / tall unicode) is cleared too. Previously
-            // only rowEnd == rows-1 got this, leaving a one-row ghost below the region.
-            let extra = cellDimension.height
-            let newY = max (0, region.origin.y - extra)
-            region = CGRect (x: 0, y: newY, width: frame.width, height: region.maxY - newY)
+        // Every run gets exactly the rect the single band used to get — including both edge allowances,
+        // so a run is never covered less than the band that contained it was.
+        func invalidationRect(_ run: ClosedRange<Int>) -> CGRect {
+            let paintStart = run.lowerBound
+            let paintEnd = run.upperBound
+            var region = CGRect (x: 0,
+                                 y: baseLine - (cellDimension.height + CGFloat(paintEnd) * cellDimension.height),
+                                 width: frame.width,
+                                 height: CGFloat(paintEnd-paintStart + 1) * cellDimension.height)
+
+            // If we are the last line, we should also queue a refresh for the "remaining" bits at the
+            // end which can be redrawn by large unicode
+            if paintEnd == terminal.rows - 1 {
+                let oh = region.height
+                let oy = region.origin.y
+                region = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
+            } else {
+                // Region ends mid-screen (a restricted DECSTBM region): extend the
+                // invalidation down by one cell so the sub-cell remainder just below the
+                // band's bottom row (descenders / tall unicode) is cleared too. Previously
+                // only rowEnd == rows-1 got this, leaving a one-row ghost below the region.
+                let extra = cellDimension.height
+                let newY = max (0, region.origin.y - extra)
+                region = CGRect (x: 0, y: newY, width: frame.width, height: region.maxY - newY)
+            }
+            return region
         }
 #if canImport(MetalKit)
         if metalView != nil {
@@ -1934,10 +1950,10 @@ extension TerminalView {
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
         } else {
-            if !nothingChanged { setNeedsDisplay(region) }
+            if !nothingChanged { for run in paintRuns { setNeedsDisplay(invalidationRect(run)) } }
         }
 #else
-        if !nothingChanged { setNeedsDisplay(region) }
+        if !nothingChanged { for run in paintRuns { setNeedsDisplay(invalidationRect(run)) } }
 #endif
         #else
         // TODO iOS: need to update the code above, but will do that when I get some real

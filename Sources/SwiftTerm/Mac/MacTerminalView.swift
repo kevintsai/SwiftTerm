@@ -404,6 +404,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// persistent bitmap, and a green result would mean nothing if the emulation itself were wrong. So it
     /// runs the same corpus twice — narrowing off, then on — and both must equal a cold full render.
     var narrowsInvalidationToChangedRows = true
+    /// Ask for **one rect per run of changed rows** instead of one band spanning the outermost two.
+    ///
+    /// The band is what a single `setNeedsDisplay` can express, and a full-screen TUI that touches its
+    /// top and its bottom in the same frame makes that band the whole pane — every frame. Splitting the
+    /// ask keeps the untouched middle out of the dirty region and out of the backing-store update that
+    /// follows it. `false` restores the single-band behaviour, which is how the benchmark runs both arms.
+    var splitsInvalidationIntoRuns = true
 
     /// What the backing store is known to hold, per SCREEN row. Written only for rows a draw painted in
     /// full; read by `visuallyChangedRowBand`. See `noteRowsOnScreen`.
@@ -1070,6 +1077,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         NSGraphicsContext.current?.cgContext
     }
     
+    /// Above this many rects, painting them one by one costs more in per-call overhead (clear, row-range
+    /// arithmetic, cache bookkeeping) than the area it saves — fall back to the union.
+    static let maxDirtyRectsPerDraw = 8
+
     override public func draw (_ dirtyRect: NSRect) {
 #if canImport(MetalKit)
         if metalView != nil {
@@ -1080,7 +1091,24 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             return
         }
         let benchT0 = renderBenchEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        drawTerminalContents (dirtyRect: dirtyRect, context: currentContext, bufferOffset: terminal.displayBuffer.yDisp)
+        // **Paint the rects AppKit is actually asking for, not their bounding box.** `dirtyRect` is the
+        // union; when the invalidation was split into runs (see `splitsInvalidationIntoRuns`) the union is
+        // exactly the band we were trying to avoid painting. `getRectsBeingDrawn` hands back the region
+        // itself — AppKit already coalesces it, so this is a small number of rects, and the fallback when
+        // it declines to break it up is the union, i.e. today's behaviour.
+        let bufferOffset = terminal.displayBuffer.yDisp
+        var rects: UnsafePointer<NSRect>? = nil
+        var count = 0
+        getRectsBeingDrawn(&rects, count: &count)
+        if let rects, count > 0, count <= Self.maxDirtyRectsPerDraw {
+            for i in 0..<count {
+                let r = rects[i]
+                if r.isEmpty { continue }
+                drawTerminalContents (dirtyRect: r, context: currentContext, bufferOffset: bufferOffset)
+            }
+        } else {
+            drawTerminalContents (dirtyRect: dirtyRect, context: currentContext, bufferOffset: bufferOffset)
+        }
         if renderBenchEnabled {
             renderBenchRecord(DispatchTime.now().uptimeNanoseconds - benchT0)
         }

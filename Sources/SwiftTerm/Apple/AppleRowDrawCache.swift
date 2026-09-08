@@ -204,27 +204,55 @@ extension TerminalView {
     /// is what keeps this free of the ghosting class of bug — if the backing store is lost, or anything
     /// else invalidates us, AppKit asks for a bigger rect and every row in it is redrawn.
     func visuallyChangedRowBand(rowStart: Int, rowEnd: Int) -> ClosedRange<Int>? {
+        guard let runs = visuallyChangedRowRuns(rowStart: rowStart, rowEnd: rowEnd) else { return nil }
+        return runs[0].lowerBound...runs[runs.count - 1].upperBound
+    }
+
+    /// The same answer as ``visuallyChangedRowBand(rowStart:rowEnd:)``, but **as the runs it is made of**
+    /// instead of collapsed into one band — in ascending row order, non-overlapping, already padded.
+    ///
+    /// Why the runs matter: the band is one rectangle, so two changed rows at opposite ends of the pane
+    /// invalidate everything between them. That is the shape a full-screen TUI produces every frame — it
+    /// touches its transcript area AND its status line — and it was measured in the field (fleetmux,
+    /// 2026-09-09): a 66-row pane repainting all 66 rows, 9–12 times a second, while the row cache said
+    /// most of those rows had not changed at all. Handing AppKit one rect per run keeps the untouched
+    /// middle out of the dirty region, and out of the backing-store update that follows it.
+    ///
+    /// Padding is per run (a descender from the row above reaches into this one), and runs that touch
+    /// after padding are merged — two rects that share an edge are one rect's worth of work.
+    func visuallyChangedRowRuns(rowStart: Int, rowEnd: Int) -> [ClosedRange<Int>]? {
         let buffer = terminal.displayBuffer
         let cols = buffer.cols
-        var lo = Int.max
-        var hi = -1
+        var runs: [ClosedRange<Int>] = []
+        var runLo = -1
+        var runHi = -1
+        func closeRun() {
+            guard runHi >= runLo, runLo >= 0 else { return }
+            let padded = max(0, runLo - 1)...min(terminal.rows - 1, runHi + 1)
+            // Merge with the previous run when padding made them touch or overlap.
+            if let last = runs.last, padded.lowerBound <= last.upperBound + 1 {
+                runs[runs.count - 1] = last.lowerBound...max(last.upperBound, padded.upperBound)
+            } else {
+                runs.append(padded)
+            }
+            runLo = -1
+            runHi = -1
+        }
         for y in rowStart...rowEnd {
             let absolute = buffer.yDisp + y
             // Out of the buffer entirely → we cannot reason about it; repaint the band as before.
-            guard absolute >= 0, absolute < buffer.lines.count else { return rowStart...rowEnd }
+            guard absolute >= 0, absolute < buffer.lines.count else { return [rowStart...rowEnd] }
             let line = buffer.lines[absolute]
             if let onScreen = rowsOnScreen[y], onScreen.lineRef === line,
                onScreen.key == rowDrawKey(row: absolute, line: line, cols: cols) {
+                closeRun()
                 continue
             }
-            lo = min(lo, y)
-            hi = max(hi, y)
+            if runLo < 0 { runLo = y }
+            runHi = y
         }
-        guard hi >= lo else { return nil }
-        // Pad by a row on each side. Glyphs are not confined to their cell — a descender from the row
-        // above reaches down into this one, and clearing this row erases it. The existing code already
-        // extends the band one cell down for the same reason; narrowing makes the top edge matter too.
-        return max(0, lo - 1)...min(terminal.rows - 1, hi + 1)
+        closeRun()
+        return runs.isEmpty ? nil : runs
     }
 
     /// Record what the backing store now holds, for the rows a draw painted **in full**.

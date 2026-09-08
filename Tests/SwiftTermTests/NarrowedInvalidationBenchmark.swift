@@ -33,6 +33,10 @@ final class NarrowedInvalidationBenchmark: XCTestCase {
             let rows = Int(fixture.dropFirst("synthetic:".count)) ?? 66
             return SyntheticSpinnerCorpus.frames(rows: rows)
         }
+        if fixture.hasPrefix("two-ends:") {
+            let rows = Int(fixture.dropFirst("two-ends:".count)) ?? 66
+            return SyntheticSpinnerCorpus.twoEndsFrames(rows: rows)
+        }
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("Fixtures/\(fixture)")
@@ -79,9 +83,10 @@ final class NarrowedInvalidationBenchmark: XCTestCase {
 
     /// One arm: replay the corpus, painting only what the view asks for. Returns the painting time and the
     /// area painted, both totalled over the corpus.
-    private func run(_ fixture: String, cols: Int, rows: Int, narrowing: Bool) throws -> (ms: Double, cells: Double, frames: Int) {
+    private func run(_ fixture: String, cols: Int, rows: Int, narrowing: Bool, splitting: Bool = true) throws -> (ms: Double, cells: Double, frames: Int) {
         let view = makeView(cols: cols, rows: rows)
         view.narrowsInvalidationToChangedRows = narrowing
+        view.splitsInvalidationIntoRuns = splitting
         let scale = 2
         guard let store = CGContext(data: nil,
                                     width: Int(view.bounds.width) * scale,
@@ -123,6 +128,34 @@ final class NarrowedInvalidationBenchmark: XCTestCase {
             nanos += DispatchTime.now().uptimeNanoseconds - t0
         }
         return (Double(nanos) / 1_000_000, rowsPainted, all.count)
+    }
+
+    /// **一段連續範圍 vs 每段變動各一個矩形。** 兩臂都已經把失效收斂到「真的變了的列」（`narrowing: true`），
+    /// 差別只在能不能表達成多個矩形——所以這裡量到的就是「帶狀」這個形狀本身的代價。
+    func testWhatSplittingTheBandIsWorth() throws {
+        guard ProcessInfo.processInfo.environment["SWIFTTERM_NARROW_BENCH"] == "1" else { return }
+        for (label, fixture, cols, rows) in [
+            ("兩端各變一段（agent TUI 的真實形狀）", "two-ends:66", 177, 66),
+            ("spinner（等待中的 agent）", "synthetic:66", 177, 66),
+            ("btop（密集 TUI，最壞情況）", "btop-through-tmux-sync.raw", 200, 50),
+        ] {
+            var band: [Double] = []
+            var runs: [Double] = []
+            var bandRows = 0.0
+            var runRows = 0.0
+            var frameCount = 0
+            for _ in 0..<5 {
+                let b = try run(fixture, cols: cols, rows: rows, narrowing: true, splitting: false)
+                let r = try run(fixture, cols: cols, rows: rows, narrowing: true, splitting: true)
+                band.append(b.ms); runs.append(r.ms)
+                bandRows = b.cells; runRows = r.cells; frameCount = b.frames
+            }
+            func median(_ xs: [Double]) -> Double { xs.sorted()[xs.count / 2] }
+            print(String(format: "%@：%d 幀 — 繪製 %.1f → %.1f ms（%+.0f%%）｜重畫列數 %.0f → %.0f（%.1f×）",
+                         label, frameCount, median(band), median(runs),
+                         (median(runs) / median(band) - 1) * 100,
+                         bandRows, runRows, bandRows / max(runRows, 0.001)))
+        }
     }
 
     func testWhatNarrowingIsWorth() throws {
