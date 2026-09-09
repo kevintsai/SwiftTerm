@@ -424,6 +424,34 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// `false` is the control arm the render tests need — and the fallback if a surface cannot be made.
     var usesOwnSurface = true
 
+    /// Move the pixels a scroll only displaced, instead of re-rendering them. Requires `usesOwnSurface`.
+    /// `false` is the control arm, and the shape the renderer had before this landed.
+    var blitsScrolledPixels = true
+
+    /// How many frames actually moved pixels, and how many rows they moved in total. Without these a
+    /// green pixel-comparison proves nothing: a blit that never fires matches a repaint trivially.
+    var blitCount = 0
+    var blitRows = 0
+    /// Height (in rows) of everything queued for painting into the surface. The number the blit exists
+    /// to shrink; without it a green pixel test cannot tell "moved the pixels" from "repainted anyway".
+    var surfacePaintRows = 0
+
+    /// Set when a blit moved pixels this cycle, and only then may `draw` paint less than it was asked.
+    ///
+    /// Without this, owning the surface silently changes what `draw(_:)` means — from "repaint this
+    /// rect" to "present whatever the surface holds" — and every invalidation that does not come from
+    /// `updateDisplay` (a font change, a resize, an exposure, a test calling `draw` directly) would
+    /// present stale pixels. Painting less is earned by having moved the pixels instead; it is not the
+    /// default.
+    var surfaceMovedPixelsThisCycle = false
+
+    /// What still has to be painted INTO the surface, accumulated by `updateDisplay`.
+    ///
+    /// Kept apart from what AppKit is asked to redraw on purpose. After a blit those two are different
+    /// sets: the surface needs only the rows that actually changed, while the screen needs all of it,
+    /// because AppKit's own backing store did not scroll with us.
+    var pendingSurfacePaint: [CGRect] = []
+
     /// The owned backing store and the geometry it was made for. See `ensureSurface()`.
     var surface: CGContext?
     var surfaceSize: CGSize = .zero
@@ -1128,10 +1156,27 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if usesOwnSurface, let (ctx, isFresh) = ensureSurface() {
             // A surface that was just created holds nothing, so this pass has to fill all of it —
             // painting only the asked-for rects would present a bitmap that is blank everywhere else.
-            let toPaint = isFresh ? [bounds] : asked
-            for r in toPaint {
-                paintIntoSurface(r, ctx, bufferOffset: bufferOffset)
+            //
+            // Otherwise paint what `updateDisplay` put aside, NOT what AppKit asked for. The two differ
+            // after a blit, and they differ in the direction that matters: AppKit is asked for the whole
+            // view (its backing store did not scroll), while the surface needs only the changed rows.
+            // An ask with nothing pending — an exposure, a lost backing store — is then free: the surface
+            // already holds the truth and only has to be presented.
+            // Paint what we were asked for, exactly as before — UNLESS a blit moved the pixels this
+            // cycle, which is the one case where painting less is justified rather than lossy.
+            let toPaint: [CGRect]
+            if isFresh {
+                toPaint = [bounds]
+            } else if surfaceMovedPixelsThisCycle {
+                toPaint = pendingSurfacePaint
+            } else {
+                toPaint = asked
             }
+            for r in toPaint {
+                paintIntoSurface(r.intersection(bounds), ctx, bufferOffset: bufferOffset)
+            }
+            pendingSurfacePaint.removeAll(keepingCapacity: true)
+            surfaceMovedPixelsThisCycle = false
             presentSurface(ctx, into: currentContext, clippedTo: isFresh ? [bounds] : asked)
         } else {
             for r in asked {

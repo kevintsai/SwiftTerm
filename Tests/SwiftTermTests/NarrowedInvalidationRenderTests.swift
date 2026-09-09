@@ -62,7 +62,25 @@ final class NarrowedInvalidationRenderTests {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("Fixtures/\(fixture)")
-        return try split([UInt8](Data(contentsOf: url)))
+        let bytes = [UInt8](try Data(contentsOf: url))
+        // The scrolling capture carries no begin-synchronized-update markers — tmux only emits those to
+        // a client that answered the DA query for them, and the recording pty did not. Its frames end
+        // where tmux restores the full scroll region instead.
+        if fixture.contains("streaming-scroll") { return splitAtScrollRegionRestore(bytes) }
+        return try split(bytes)
+    }
+
+    private func splitAtScrollRegionRestore(_ bytes: [UInt8]) -> [[UInt8]] {
+        let marker: [UInt8] = Array("\u{1b}[1;24r".utf8)
+        var out: [[UInt8]] = [], current: [UInt8] = []
+        for b in bytes {
+            current.append(b)
+            if current.count >= marker.count, Array(current.suffix(marker.count)) == marker {
+                out.append(current); current = []
+            }
+        }
+        if !current.isEmpty { out.append(current) }
+        return out
     }
 
     /// Split a raw capture at begin-synchronized-update markers, so each element is one tmux frame.
@@ -138,10 +156,11 @@ final class NarrowedInvalidationRenderTests {
 
     /// Replay the corpus into one store, repainting only what the view asked for.
     private func incremental(_ fixture: String, cols: Int, rows: Int, narrowing: Bool,
-                             surfaced: Bool = true) throws -> Surface? {
+                             surfaced: Bool = true, blitting: Bool = false) throws -> Surface? {
         let view = makeView(cols: cols, rows: rows)
         view.narrowsInvalidationToChangedRows = narrowing
         view.usesOwnSurface = surfaced
+        view.blitsScrolledPixels = blitting
         guard let store = makeStore(view) else { return nil }
         paint(view, view.bounds, into: store)  // the first, full paint
 
@@ -151,7 +170,53 @@ final class NarrowedInvalidationRenderTests {
             view.updateDisplay(notifyAccessibility: false)
             for rect in view.invalidated { paint(view, rect.intersection(view.bounds), into: store) }
         }
+        lastBlits = (view.blitCount, view.blitRows)
+        lastPaintRows = view.surfacePaintRows
         return surface(store)
+    }
+
+    /// Set by the most recent `incremental(...)`. See `blittingScrolledPixelsMatchesRepaintingThem`.
+    private var lastBlits: (frames: Int, rows: Int) = (0, 0)
+    private var lastPaintRows = 0
+
+    /// Replay the corpus twice in lockstep — blit off and blit on — comparing every `checkEvery` frames.
+    ///
+    /// **Comparing only the final image is not a guard for a blit.** A blit writes pixels nobody
+    /// re-derives, but the rows around it keep being repainted, so a wrong move can be papered over by
+    /// the time the corpus ends — verified: flipping the memmove direction left the final image
+    /// identical. What the user would have seen is the frames in between, so those are what this checks.
+    ///
+    /// The control arm is the one already pinned equal to a cold render, so "equal to the control" is
+    /// equal to a cold render at every checkpoint, without paying for a cold render at every checkpoint.
+    private func firstDivergentFrame(_ fixture: String, cols: Int, rows: Int,
+                                     checkEvery: Int) throws -> (frame: Int, detail: String)? {
+        let control = makeView(cols: cols, rows: rows)
+        control.narrowsInvalidationToChangedRows = true
+        control.usesOwnSurface = true
+        control.blitsScrolledPixels = false
+        let blit = makeView(cols: cols, rows: rows)
+        blit.narrowsInvalidationToChangedRows = true
+        blit.usesOwnSurface = true
+        blit.blitsScrolledPixels = true
+        guard let controlStore = makeStore(control), let blitStore = makeStore(blit) else { return nil }
+        paint(control, control.bounds, into: controlStore)
+        paint(blit, blit.bounds, into: blitStore)
+
+        for (index, frame) in try frames(fixture).enumerated() {
+            for (view, store) in [(control, controlStore), (blit, blitStore)] {
+                view.invalidated.removeAll()
+                view.terminal.feed(byteArray: frame)
+                view.updateDisplay(notifyAccessibility: false)
+                for rect in view.invalidated { paint(view, rect.intersection(view.bounds), into: store) }
+            }
+            guard index % checkEvery == 0 || index == 0 else { continue }
+            guard let a = surface(controlStore), let b = surface(blitStore) else { continue }
+            let diff = worstDifference(a, b)
+            if diff.beyondHair > 0 {
+                return (index, "最大差 \(diff.maxDelta)、\(diff.beyondHair) 個 pixel，\(differingRows(b, a))")
+            }
+        }
+        return nil
     }
 
     /// The same bytes into a view that has drawn nothing yet, painted once, whole.
@@ -162,6 +227,7 @@ final class NarrowedInvalidationRenderTests {
     private func cold(_ fixture: String, cols: Int, rows: Int) throws -> Surface? {
         let view = makeView(cols: cols, rows: rows)
         view.usesOwnSurface = false
+        view.blitsScrolledPixels = false
         for frame in try frames(fixture) {
             view.terminal.feed(byteArray: frame)
             view.updateDisplay(notifyAccessibility: false)
@@ -229,6 +295,54 @@ final class NarrowedInvalidationRenderTests {
         #expect(narrowedDiff.beyondHair == 0, "\(narrowedWhy)")
     }
 
+    /// Moving the pixels a scroll displaced must land them exactly where re-rendering them would have.
+    ///
+    /// This is the arm that matters: everything else in this file guards a change that only decides
+    /// WHICH rows are painted, and gets a second chance every time AppKit asks for a bigger rect. A blit
+    /// writes pixels nobody re-derives, so a mistake here survives until something else happens to
+    /// repaint that row — the ghosting class of bug, the one only the user sees.
+    ///
+    /// The corpus has to scroll for this to mean anything: btop repaints in place and the synthetic
+    /// spinner does not scroll at all, so both would pass with the blit completely broken.
+    /// `mustBlit` says whether this corpus is supposed to exercise the blit at all. btop is here with
+    /// `false` on purpose: it repaints in place and never scrolls, so it cannot prove the blit right —
+    /// what it proves is that turning the blit on does not disturb a TUI that has nothing to move.
+    @Test(arguments: [("streaming-scroll-through-tmux.raw", 80, 24, true),
+                      ("btop-through-tmux-sync.raw", 200, 50, false)])
+    func blittingScrolledPixelsMatchesRepaintingThem(corpus: (fixture: String, cols: Int, rows: Int, mustBlit: Bool)) throws {
+        let (fixture, cols, rows, mustBlit) = corpus
+        let reference = try #require(try cold(fixture, cols: cols, rows: rows))
+
+        let repainted = try #require(try incremental(fixture, cols: cols, rows: rows, narrowing: true,
+                                                     surfaced: true, blitting: false))
+        let controlPaintRows = lastPaintRows
+        print("  \(fixture): 控制組（不搬）畫進 surface \(controlPaintRows) 列")
+        let repaintedDiff = worstDifference(repainted, reference)
+        #expect(repaintedDiff.beyondHair == 0,
+                "控制組（surface 開、blit 關）就對不上 = 問題不在 blit（\(fixture)）：最大差 \(repaintedDiff.maxDelta)，\(differingRows(repainted, reference))")
+
+        let blitted = try #require(try incremental(fixture, cols: cols, rows: rows, narrowing: true,
+                                                   surfaced: true, blitting: true))
+        let fired = lastBlits
+        // Without this the comparison above is vacuous: a blit that never fires matches a repaint.
+        if mustBlit {
+            #expect(fired.frames > 0,
+                    "這份語料一次都沒有搬過像素（\(fixture)），所以上面的像素比對什麼都沒證明")
+            print("  \(fixture): 搬了 \(fired.frames) 幀、合計 \(fired.rows) 列；畫進 surface \(lastPaintRows) 列")
+        } else {
+            #expect(fired.frames == 0,
+                    "\(fixture) 不該捲動，卻搬了 \(fired.frames) 幀——偵測到了不存在的位移")
+        }
+        let blittedDiff = worstDifference(blitted, reference)
+        #expect(blittedDiff.beyondHair == 0,
+                "搬過的像素落點不對（\(fixture)）：最大差 \(blittedDiff.maxDelta)，\(differingRows(blitted, reference))")
+
+        // …and the frames in between, which is where a wrong move actually shows up.
+        let divergence = try firstDivergentFrame(fixture, cols: cols, rows: rows, checkEvery: 7)
+        #expect(divergence == nil,
+                "第 \(divergence?.frame ?? -1) 幀開始，搬過的畫面就與重繪的不同（\(fixture)）：\(divergence?.detail ?? "")")
+    }
+
     /// Painting into the view's own surface and presenting it must put the same pixels on screen as
     /// painting straight into AppKit's backing store.
     ///
@@ -236,7 +350,9 @@ final class NarrowedInvalidationRenderTests {
     /// (`MacTerminalSurface.swift`). None of that is in this arm — this pins the step before it, so that
     /// when the move lands, a difference can only have come from the move. Both arms run with narrowing
     /// on, i.e. the real configuration; the reference is a cold render through the pre-surface path.
-    @Test(arguments: [("synthetic:66", 177, 66), ("btop-through-tmux-sync.raw", 200, 50)])
+    @Test(arguments: [("synthetic:66", 177, 66),
+                      ("btop-through-tmux-sync.raw", 200, 50),
+                      ("streaming-scroll-through-tmux.raw", 80, 24)])
     func theOwnedSurfacePutsTheSamePixelsOnScreen(corpus: (fixture: String, cols: Int, rows: Int)) throws {
         let (fixture, cols, rows) = corpus
         let reference = try #require(try cold(fixture, cols: cols, rows: rows))

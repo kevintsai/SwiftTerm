@@ -292,8 +292,17 @@ extension TerminalView {
         }
         for y in rowStart...rowEnd {
             let absolute = buffer.yDisp + y
-            // Out of the buffer entirely → we cannot reason about it; repaint the band as before.
-            guard absolute >= 0, absolute < buffer.lines.count else { return [rowStart...rowEnd] }
+            // A row outside the buffer cannot be reasoned about — but that is a reason to repaint THAT
+            // row, not to give up on the rest. Bailing out here made the whole mechanism a no-op on the
+            // case it matters most: a scrolling alt-screen pane, where `getUpdateRange()` routinely
+            // hands back a band one or two rows past the end of a scroll region, so every frame took
+            // this branch and repainted all of it. (Measured 2026-09-09: band 0...25 against a 25-line
+            // buffer, every frame of the streaming corpus, narrowing never once applied.)
+            guard absolute >= 0, absolute < buffer.lines.count else {
+                if runLo < 0 { runLo = y }
+                runHi = y
+                continue
+            }
             let line = buffer.lines[absolute]
             if let onScreen = rowsOnScreen[y], onScreen.lineRef === line,
                onScreen.key == rowDrawKey(row: absolute, line: line, cols: cols) {

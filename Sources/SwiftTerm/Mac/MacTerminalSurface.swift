@@ -87,4 +87,112 @@ extension TerminalView {
         viewContext.restoreGState()
     }
 }
+
+extension TerminalView {
+    /// Move the pixels that only scrolled, instead of re-rendering them.
+    ///
+    /// Returns the number of screen rows the surface was shifted by, or 0 if nothing was moved.
+    ///
+    /// **How the shift is found**: by line identity. `rowsOnScreen` records which `BufferLine` is painted
+    /// at each screen row; if the line now at row `y` is the one that was recorded at `y + d` for the same
+    /// `d` across most rows, the display scrolled by `d`. That is the same signal the row cache keys on,
+    /// so the two cannot disagree about what moved.
+    ///
+    /// **Why a majority and not all rows**: a DECSTBM region scrolls only part of the pane (tmux keeps a
+    /// status line out of it). Shifting the whole surface then moves rows that did not scroll — which is
+    /// safe, because their records move with them, stop matching, and they get repainted. It costs a
+    /// couple of extra rows, not correctness.
+    ///
+    /// **Why an integral row height is required**: the shift is a byte move, so a row has to be a whole
+    /// number of pixels. `cellHeight` is already `ceil`'d and macOS scales are 1 or 2, so this holds in
+    /// practice; when it does not, the guard simply declines and every row is repainted as before.
+    func blitScrolledPixels() -> Int {
+        guard usesOwnSurface, blitsScrolledPixels, let ctx = surface, !rowsOnScreen.isEmpty else { return 0 }
+        let rowPixels = cellDimension.height * surfaceScale
+        guard rowPixels >= 1, abs(rowPixels - rowPixels.rounded()) < 0.001 else { return 0 }
+        let rowPx = Int(rowPixels.rounded())
+
+        let buffer = terminal.displayBuffer
+        let rows = terminal.rows
+        var current: [Int: ObjectIdentifier] = [:]
+        for y in 0..<rows {
+            let absolute = buffer.yDisp + y
+            guard absolute >= 0, absolute < buffer.lines.count else { continue }
+            current[y] = ObjectIdentifier(buffer.lines[absolute])
+        }
+        guard !current.isEmpty else { return 0 }
+
+        var votes: [Int: Int] = [:]
+        for (y, id) in current {
+            for (prevY, prev) in rowsOnScreen where ObjectIdentifier(prev.lineRef) == id {
+                let d = prevY - y
+                if d != 0 { votes[d, default: 0] += 1 }
+            }
+        }
+        // A shift has to explain most of the screen. A couple of coincidentally equal lines (two blank
+        // rows) must not be enough to move the whole surface.
+        guard let (shift, agreeing) = votes.max(by: { $0.value < $1.value }),
+              agreeing * 2 > rows, abs(shift) < rows else { return 0 }
+
+        let moveRows = rows - abs(shift)
+        guard moveRows > 0, let data = ctx.data else { return 0 }
+        let bytesPerRow = ctx.bytesPerRow
+        let height = ctx.height
+        let moveBytes = moveRows * rowPx * bytesPerRow
+        let offsetBytes = abs(shift) * rowPx * bytesPerRow
+        guard moveBytes > 0, offsetBytes + moveBytes <= height * bytesPerRow else { return 0 }
+
+        // Screen row 0 is the top of the image, which is the first row in the bitmap's memory. Content
+        // moving UP the screen (`shift > 0`: the line that was at row `shift` is now at row 0) therefore
+        // moves toward lower addresses.
+        if shift > 0 {
+            memmove(data, data.advanced(by: offsetBytes), moveBytes)
+        } else {
+            memmove(data.advanced(by: offsetBytes), data, moveBytes)
+        }
+
+        // The records move with the pixels, so the rows that scrolled now compare equal and drop out of
+        // the invalidation. A row whose shaped output encodes its position (a kitty placeholder) is the
+        // one thing that cannot be reused at a different row, so its record is dropped instead of moved.
+        var moved: [Int: RowOnScreen] = [:]
+        for (prevY, record) in rowsOnScreen {
+            let newY = prevY - shift
+            guard newY >= 0, newY < rows else { continue }
+            if rowDrawCache[ObjectIdentifier(record.lineRef)]?.positionDependent == true { continue }
+            moved[newY] = record
+        }
+        rowsOnScreen = moved
+        blitCount += 1
+        blitRows += moveRows
+        return shift
+    }
+}
+
+extension TerminalView {
+    /// Record what the surface still needs painted, and ask AppKit for what the screen still needs.
+    ///
+    /// These are the same set until a blit happens, and different afterwards — the whole point of the
+    /// surface. The screen needs everything (AppKit's backing store did not scroll); the surface needs
+    /// only the rows that actually changed.
+    func queueSurfacePaintAndInvalidate(_ runs: [ClosedRange<Int>],
+                                        nothingChanged: Bool,
+                                        blitted: Int,
+                                        rect: (ClosedRange<Int>) -> CGRect) {
+        if !nothingChanged {
+            for run in runs {
+                let r = rect(run)
+                surfacePaintRows += run.count
+                if usesOwnSurface { pendingSurfacePaint.append(r) }
+                if blitted == 0 { setNeedsDisplay(r) }
+            }
+        }
+        if blitted != 0 {
+            surfaceMovedPixelsThisCycle = true
+            // Everything moved on screen, so everything has to be put back — even the rows that were
+            // not repainted. Skipping this is precisely the ghosting bug this design has to avoid.
+            setNeedsDisplay(bounds)
+        }
+    }
+}
+
 #endif

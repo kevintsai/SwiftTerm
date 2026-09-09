@@ -1873,6 +1873,15 @@ extension TerminalView {
         #else
         let coreTextPath = true
         #endif
+        // Move the pixels a scroll only displaced BEFORE asking what changed: once the records have
+        // moved with them, the rows that merely scrolled compare equal and drop out of the answer, so
+        // the narrowing below is what turns the blit into less painting.
+        var blitted = 0
+        #if os(macOS)
+        if coreTextPath {
+            blitted = blitScrolledPixels()
+        }
+        #endif
         if coreTextPath && narrowsInvalidationToChangedRows {
             // **One rect per run of changed rows, not one band across all of them.** A full-screen TUI
             // touches its top and its bottom in the same frame, so the band between them is the whole
@@ -1950,10 +1959,12 @@ extension TerminalView {
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
         } else {
-            if !nothingChanged { for run in paintRuns { setNeedsDisplay(invalidationRect(run)) } }
+            queueSurfacePaintAndInvalidate(paintRuns, nothingChanged: nothingChanged, blitted: blitted,
+                                           rect: invalidationRect)
         }
 #else
-        if !nothingChanged { for run in paintRuns { setNeedsDisplay(invalidationRect(run)) } }
+        queueSurfacePaintAndInvalidate(paintRuns, nothingChanged: nothingChanged, blitted: blitted,
+                                       rect: invalidationRect)
 #endif
         #else
         // TODO iOS: need to update the code above, but will do that when I get some real
