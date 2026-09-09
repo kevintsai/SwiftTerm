@@ -137,9 +137,11 @@ final class NarrowedInvalidationRenderTests {
     }
 
     /// Replay the corpus into one store, repainting only what the view asked for.
-    private func incremental(_ fixture: String, cols: Int, rows: Int, narrowing: Bool) throws -> Surface? {
+    private func incremental(_ fixture: String, cols: Int, rows: Int, narrowing: Bool,
+                             surfaced: Bool = true) throws -> Surface? {
         let view = makeView(cols: cols, rows: rows)
         view.narrowsInvalidationToChangedRows = narrowing
+        view.usesOwnSurface = surfaced
         guard let store = makeStore(view) else { return nil }
         paint(view, view.bounds, into: store)  // the first, full paint
 
@@ -153,8 +155,13 @@ final class NarrowedInvalidationRenderTests {
     }
 
     /// The same bytes into a view that has drawn nothing yet, painted once, whole.
+    ///
+    /// Deliberately painted WITHOUT the owned surface: the reference has to come from the path that
+    /// predates it, or "surfaced output matches the reference" would only be saying the surface agrees
+    /// with itself.
     private func cold(_ fixture: String, cols: Int, rows: Int) throws -> Surface? {
         let view = makeView(cols: cols, rows: rows)
+        view.usesOwnSurface = false
         for frame in try frames(fixture) {
             view.terminal.feed(byteArray: frame)
             view.updateDisplay(notifyAccessibility: false)
@@ -220,6 +227,29 @@ final class NarrowedInvalidationRenderTests {
         let narrowedDiff = worstDifference(narrowed, reference)
         let narrowedWhy = "只重畫變動列之後有東西留著舊內容（\(fixture)）：最大差 \(narrowedDiff.maxDelta)，\(differingRows(narrowed, reference))"
         #expect(narrowedDiff.beyondHair == 0, "\(narrowedWhy)")
+    }
+
+    /// Painting into the view's own surface and presenting it must put the same pixels on screen as
+    /// painting straight into AppKit's backing store.
+    ///
+    /// The surface exists so that scrolled pixels can be MOVED instead of re-rendered
+    /// (`MacTerminalSurface.swift`). None of that is in this arm — this pins the step before it, so that
+    /// when the move lands, a difference can only have come from the move. Both arms run with narrowing
+    /// on, i.e. the real configuration; the reference is a cold render through the pre-surface path.
+    @Test(arguments: [("synthetic:66", 177, 66), ("btop-through-tmux-sync.raw", 200, 50)])
+    func theOwnedSurfacePutsTheSamePixelsOnScreen(corpus: (fixture: String, cols: Int, rows: Int)) throws {
+        let (fixture, cols, rows) = corpus
+        let reference = try #require(try cold(fixture, cols: cols, rows: rows))
+
+        let direct = try #require(try incremental(fixture, cols: cols, rows: rows, narrowing: true, surfaced: false))
+        let directDiff = worstDifference(direct, reference)
+        #expect(directDiff.beyondHair == 0,
+                "控制組（不經 surface）就對不上 = harness 在說謊（\(fixture)）：最大差 \(directDiff.maxDelta)，\(differingRows(direct, reference))")
+
+        let surfaced = try #require(try incremental(fixture, cols: cols, rows: rows, narrowing: true, surfaced: true))
+        let surfacedDiff = worstDifference(surfaced, reference)
+        #expect(surfacedDiff.beyondHair == 0,
+                "經過自有 surface 之後畫面不同（\(fixture)）：最大差 \(surfacedDiff.maxDelta)，\(differingRows(surfaced, reference))")
     }
 }
 #endif

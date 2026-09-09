@@ -419,6 +419,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// ask keeps the untouched middle out of the dirty region and out of the backing-store update that
     /// follows it. `false` restores the single-band behaviour, which is how the benchmark runs both arms.
     var splitsInvalidationIntoRuns = true
+    /// Paint into a bitmap this view owns, then put that bitmap on screen, instead of painting straight
+    /// into AppKit's backing store. See `MacTerminalSurface.swift` for why the view has to own one.
+    /// `false` is the control arm the render tests need — and the fallback if a surface cannot be made.
+    var usesOwnSurface = true
+
+    /// The owned backing store and the geometry it was made for. See `ensureSurface()`.
+    var surface: CGContext?
+    var surfaceSize: CGSize = .zero
+    var surfaceScale: CGFloat = 0
 
     /// What the backing store is known to hold, per SCREEN row. Written only for rows a draw painted in
     /// full; read by `visuallyChangedRowBand`. See `noteRowsOnScreen`.
@@ -1108,14 +1117,26 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         var rects: UnsafePointer<NSRect>? = nil
         var count = 0
         getRectsBeingDrawn(&rects, count: &count)
+        var asked: [CGRect] = []
         if let rects, count > 0, count <= Self.maxDirtyRectsPerDraw {
-            for i in 0..<count {
-                let r = rects[i]
-                if r.isEmpty { continue }
+            for i in 0..<count where !rects[i].isEmpty {
+                asked.append(rects[i])
+            }
+        }
+        if asked.isEmpty { asked = [dirtyRect] }
+
+        if usesOwnSurface, let (ctx, isFresh) = ensureSurface() {
+            // A surface that was just created holds nothing, so this pass has to fill all of it —
+            // painting only the asked-for rects would present a bitmap that is blank everywhere else.
+            let toPaint = isFresh ? [bounds] : asked
+            for r in toPaint {
+                paintIntoSurface(r, ctx, bufferOffset: bufferOffset)
+            }
+            presentSurface(ctx, into: currentContext, clippedTo: isFresh ? [bounds] : asked)
+        } else {
+            for r in asked {
                 drawTerminalContents (dirtyRect: r, context: currentContext, bufferOffset: bufferOffset)
             }
-        } else {
-            drawTerminalContents (dirtyRect: dirtyRect, context: currentContext, bufferOffset: bufferOffset)
         }
         if renderBenchEnabled {
             renderBenchRecord(DispatchTime.now().uptimeNanoseconds - benchT0)
