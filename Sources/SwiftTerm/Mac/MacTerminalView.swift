@@ -422,7 +422,18 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Paint into a bitmap this view owns, then put that bitmap on screen, instead of painting straight
     /// into AppKit's backing store. See `MacTerminalSurface.swift` for why the view has to own one.
     /// `false` is the control arm the render tests need — and the fallback if a surface cannot be made.
-    var usesOwnSurface = true
+    ///
+    /// **Off by default, and measured that way.** Painting into an owned bitmap costs less per row and
+    /// far fewer rows (83% fewer on the scrolling corpus), but AppKit's backing store does not scroll
+    /// with us, so the whole surface has to be presented every frame — and in the real app that present
+    /// cost more than everything the blit saved: 19.2% -> 27.6% of one core at matched load, with
+    /// `CGBlt_fillBytes <- RIPLayerBltShape <- ripc_Render` the hottest thing in the profile.
+    ///
+    /// The offline model said 68% and was wrong because its baseline arm also painted into a plain
+    /// bitmap; the real baseline paints into AppKit's store, which is much faster. Removing the present
+    /// (handing the surface to `layer.contents` instead of drawing it) is the route that could make this
+    /// pay, and it has to be measured against the RIGHT baseline before it is turned on again.
+    var usesOwnSurface = false
 
     /// Move the pixels a scroll only displaced, instead of re-rendering them. Requires `usesOwnSurface`.
     /// `false` is the control arm, and the shape the renderer had before this landed.
