@@ -450,9 +450,24 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// **On again (2026-09-10)**: the swap chain that replaces the single buffer is finished and guarded
     /// by `theBufferPresentedEachFrameHoldsThatFrame`, which reads the buffer handed to the compositor on
     /// each frame rather than the picture left at the end. It found the chain wrong from frame 3 of the
-    /// scrolling corpus, and that is what got fixed. Whether the flicker is gone is still a question only
-    /// a person looking at the screen can answer.
-    public var usesOwnSurface = true
+    /// scrolling corpus, and that is what got fixed. The flicker is gone, confirmed by a person watching.
+    ///
+    /// **Off again, for good (2026-09-10), and this time on a real A/B.** With both arms in ONE running
+    /// app — same binary, same panes, same load, one variable — the owned surface costs MORE, not less:
+    /// 0.40–0.44 %-of-a-core per KB/s against 0.37 for painting into AppKit's store, across two
+    /// independently designed runs. The profile says where it goes: at matched load the surface arm pays
+    /// `ripc_Render` and `CGBlt_fillBytes` — CoreGraphics' generic raster path — which the AppKit arm does
+    /// not pay at all, and paints the same content ~1.5x more expensively per byte. AppKit's display path
+    /// really does disappear (63 samples to 2); the cost simply moves into our own painting.
+    ///
+    /// That is the same lesson B1 taught and this fork under-weighted twice: **the real baseline paints
+    /// into AppKit's backing store, and that path is fast.** The swap chain is not the culprit — a cache
+    /// problem would make the same symbols slower, not add new ones — and there is no cheaper chain to
+    /// try, because fewer than three buffers tears without private API.
+    ///
+    /// The code stays: it is correct, it is guarded, and `fleetmux`'s `render-path` preference flips
+    /// between the arms in a running app, which is what made the honest comparison possible at all.
+    public var usesOwnSurface = false
 
     /// Move the pixels a scroll only displaced, instead of re-rendering them. Requires `usesOwnSurface`.
     /// `false` is the control arm, and the shape the renderer had before this landed.
@@ -494,9 +509,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// benchmark's control arm painted into a plain bitmap while the real one paints into AppKit's
     /// store (spec 27 §4).
     ///
-    /// On with `usesOwnSurface` — see there for the measurement, the flicker, and what the swap chain in
-    /// `MacTerminalSurface.swift` had to get right before this could come back.
-    public var presentsViaLayerContents = true
+    /// Off with `usesOwnSurface` — see there for the A/B that settled it. Correct, guarded, and measured
+    /// to cost more than the path it replaces.
+    public var presentsViaLayerContents = false
 
     /// The owned backing store and the geometry it was made for. See `ensureSurface()`.
     var surface: CGContext?
