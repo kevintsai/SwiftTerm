@@ -88,6 +88,47 @@ extension TerminalView {
         ctx.restoreGState()
     }
 
+    /// The rect a run of changed screen rows is painted through — the ONE definition of it.
+    ///
+    /// A run is painted wider than the rows it names: one cell below for descenders and tall unicode that
+    /// reach out of their own row, and all the way to the bottom edge when the run ends at the last row.
+    /// Every path that paints a run has to use this same rect, or the swap chain's buffers paint different
+    /// amounts for the same recorded rows and disagree at run edges.
+    func rowRunInvalidationRect(_ run: ClosedRange<Int>) -> CGRect {
+        let baseLine = frame.height
+        var region = CGRect(x: 0,
+                            y: baseLine - (cellDimension.height + CGFloat(run.upperBound) * cellDimension.height),
+                            width: frame.width,
+                            height: CGFloat(run.upperBound - run.lowerBound + 1) * cellDimension.height)
+        if run.upperBound == terminal.rows - 1 {
+            // The last row also owns the sub-cell remainder below it.
+            region = CGRect(x: 0, y: 0, width: frame.width, height: region.height + region.origin.y)
+        } else {
+            let newY = max(0, region.origin.y - cellDimension.height)
+            region = CGRect(x: 0, y: newY, width: frame.width, height: region.maxY - newY)
+        }
+        return region
+    }
+
+    /// Adjacent and overlapping rows merged into runs, ascending. Two rects that touch are one rect's work.
+    func coalescedRowRuns(_ rows: Set<Int>) -> [ClosedRange<Int>] {
+        var out: [ClosedRange<Int>] = []
+        for row in rows.sorted() {
+            if let last = out.last, row <= last.upperBound + 1 {
+                out[out.count - 1] = last.lowerBound...max(last.upperBound, row)
+            } else {
+                out.append(row...row)
+            }
+        }
+        return out
+    }
+
+    /// The buffer this frame is being painted into — the one about to be handed to the compositor.
+    var currentSurfaceBuffer: TerminalSurfaceBuffer? {
+        guard surfaceChainIndex >= 0, surfaceChainIndex < surfaceChain.count else { return nil }
+        return surfaceChain[surfaceChainIndex]
+    }
+
     /// Put the surface on screen, clipped to the rects AppKit asked for.
     ///
     /// One `draw` of the whole image rather than one per rect: the clip already limits what lands, and
@@ -149,22 +190,19 @@ extension TerminalView {
               agreeing * 2 > rows, abs(shift) < rows else { return 0 }
 
         let moveRows = rows - abs(shift)
-        guard moveRows > 0, let data = ctx.data else { return 0 }
-        let bytesPerRow = ctx.bytesPerRow
-        let height = ctx.height
-        let moveBytes = moveRows * rowPx * bytesPerRow
-        let offsetBytes = abs(shift) * rowPx * bytesPerRow
-        guard moveBytes > 0, offsetBytes + moveBytes <= height * bytesPerRow else { return 0 }
+        guard moveRows > 0, ctx.data != nil else { return 0 }
+        let moveBytes = moveRows * rowPx * ctx.bytesPerRow
+        let offsetBytes = abs(shift) * rowPx * ctx.bytesPerRow
+        guard moveBytes > 0, offsetBytes + moveBytes <= ctx.height * ctx.bytesPerRow else { return 0 }
 
-        // Screen row 0 is the top of the image, which is the first row in the bitmap's memory. Content
-        // moving UP the screen (`shift > 0`: the line that was at row `shift` is now at row 0) therefore
-        // moves toward lower addresses.
-        _ = data
-        _ = moveBytes
-        _ = offsetBytes
         // Move the buffer we are painting into; the others record the scroll and apply it when their
         // turn comes (`catchUpSurface`), so no surface is written while it may still be on screen.
         withSurfaceLocked { shiftSurfaceBytes(ctx, by: shift) }
+        // What this buffer still owes moved with its pixels. Its debt is named in screen rows, and the
+        // screen just moved under it.
+        if let front = currentSurfaceBuffer {
+            front.owed = shiftedRows(front.owed, by: shift)
+        }
 
         // The records move with the pixels, so the rows that scrolled now compare equal and drop out of
         // the invalidation. A row whose shaped output encodes its position (a kitty placeholder) is the
@@ -218,10 +256,11 @@ extension TerminalView {
     /// No copy anywhere in the frame — not `makeImage()`, not a blit into the view's context. The layer
     /// is told to stop managing its own contents (`.never`), because the contents are ours now.
     ///
-    /// Single-buffered on purpose. Double buffering would mean copying the front buffer into the back
-    /// one every frame to keep incremental painting valid, which is the very cost this exists to remove.
-    /// The exposure is a torn frame if the compositor samples mid-paint; a terminal repaints the torn
-    /// rows on the next frame anyway, and the alternative gives back the entire win.
+    /// A chain of them, not one. The first cut was single-buffered on the theory that double buffering
+    /// means copying the front buffer into the back one every frame — true when every frame repaints
+    /// everything, and false here: a buffer catches up by replaying the memmoves and the handful of rows
+    /// it missed. Writing into the surface the compositor is sampling is what the single buffer actually
+    /// bought, and that is the flicker.
     func makeLayerBackedSurface(_ pixelWidth: Int, _ pixelHeight: Int, _ scale: CGFloat) -> CGContext? {
         guard pixelWidth > 0, pixelHeight > 0, let layer else { return nil }
         surfaceChain.removeAll(keepingCapacity: true)
@@ -267,13 +306,20 @@ extension TerminalView {
     /// Pick the surface this frame will be painted into and bring it current, BEFORE this frame's own
     /// scroll and repaint are applied to it. Order matters: the operations it missed are older than the
     /// ones about to happen, and replaying them afterwards would move this frame's pixels twice.
-    func prepareSurfaceForFrame(bufferOffset: Int) {
+    func prepareSurfaceForFrame() {
         guard presentsViaLayerContents, usesOwnSurface, !surfaceChain.isEmpty else { return }
         surfaceChainIndex = (surfaceChainIndex + 1) % surfaceChain.count
         let back = surfaceChain[surfaceChainIndex]
         surface = back.ctx
         surfaceIOSurface = back.io
-        withSurfaceLocked { catchUpSurface(back, bufferOffset: bufferOffset) }
+        // Only the byte moves, and only the ones this buffer missed. **Its rows are deliberately not
+        // painted here.** They would be painted with the content this frame already carries but at the
+        // coordinates of the frame before it, and the blit that runs next would then displace them —
+        // measured as the buffer handed to the compositor being wrong from frame 3 of a scrolling corpus
+        // (`theBufferPresentedEachFrameHoldsThatFrame`). The debt is carried through the blit instead and
+        // paid in `renderIntoLayerSurface`, together with this frame's own rows and in this frame's
+        // coordinates.
+        withSurfaceLocked { replayMissedScrolls(back) }
     }
 
     /// Paint whatever is outstanding into the surface and let the compositor know it changed.
@@ -284,7 +330,18 @@ extension TerminalView {
         guard presentsViaLayerContents, usesOwnSurface else { return }
         guard let (ctx, isFresh) = ensureSurface() else { return }
         let full = isFresh || surfaceNeedsFullRepaint
-        let toPaint = full ? [bounds] : pendingSurfacePaint
+        var toPaint = full ? [bounds] : pendingSurfacePaint
+        if let front = currentSurfaceBuffer {
+            if full {
+                front.owed.removeAll(keepingCapacity: true)
+            } else if !front.owed.isEmpty {
+                // The rows this buffer missed while it was idle, now in this frame's coordinates, painted
+                // through the same rect as the rows this frame changed.
+                toPaint.append(contentsOf: coalescedRowRuns(front.owed).map(rowRunInvalidationRect))
+                surfacePaintRows += front.owed.count
+                front.owed.removeAll(keepingCapacity: true)
+            }
+        }
         if full {
             // A full repaint is a frame the other buffers missed too — and at creation they are blank,
             // so without this they stay blank apart from whatever incremental rows land on them later.
@@ -293,8 +350,12 @@ extension TerminalView {
         }
         surfaceNeedsFullRepaint = false
         pendingSurfacePaint.removeAll(keepingCapacity: true)
+        let moved = surfaceMovedPixelsThisCycle
         surfaceMovedPixelsThisCycle = false
-        guard !toPaint.isEmpty else { return }
+        // A blit with nothing to repaint still has to be handed over: the pixels moved in THIS buffer,
+        // and the one the compositor is still holding did not move — it has the scroll sitting in its
+        // pending list. Returning here would leave an unscrolled frame on screen.
+        guard !toPaint.isEmpty || moved else { return }
         withSurfaceLocked {
             for r in toPaint {
                 paintIntoSurface(r.intersection(bounds), ctx, bufferOffset: bufferOffset)
@@ -317,16 +378,13 @@ extension TerminalView {
         io.unlock(options: [], seed: nil)
     }
 
-    /// Tell Core Animation the contents object it already holds now contains a different picture.
+    /// Re-establish the layer's contents if something dropped them.
     ///
-    /// ⚠ **There is no public way to say that**, and that is the open half of the flicker. Re-assigning
-    /// `layer.contents` is the same object every frame, so the assignment carries no information; the
-    /// API that means "these contents were mutated in place" (`-[CALayer setContentsChanged]`) is not in
-    /// the public headers, and this fork does not call private API. The documented way to hand Core
-    /// Animation a new frame is to hand it a **different surface** — a swap chain — which is why the
-    /// remaining work is double buffering and not another one-line signal.
-    ///
-    /// Until then this only re-establishes contents if something dropped them.
+    /// It cannot do more than that. There is no public way to say "the object you are holding now
+    /// contains a different picture": re-assigning `layer.contents` with the same object carries no
+    /// information, and `-[CALayer setContentsChanged]` — which means exactly that — is not in the public
+    /// headers, and this fork does not call private API. Handing Core Animation a **different** surface
+    /// is the documented way to announce a frame, which is why the chain exists rather than a signal.
     func noteSurfaceContentsChanged() {
         guard let layer, let io = surfaceIOSurface else { return }
         if layer.contents == nil { layer.contents = io }
@@ -346,6 +404,11 @@ extension TerminalView {
     /// buffer painted last would pass while the other two show something older — which is not a subtle
     /// wrongness, it is the flicker.
     func allSurfacePixelsForTesting(bufferOffset: Int) -> [(bytes: Data, bytesPerRow: Int, height: Int)] {
+        // Catching a buffer up paints, and painting writes `rowsOnScreen` — the record of what the SCREEN
+        // holds. Two of these three buffers are not the screen, so the record is put back afterwards
+        // rather than left describing memory nobody was shown.
+        let onScreen = rowsOnScreen
+        defer { rowsOnScreen = onScreen }
         var out: [(Data, Int, Int)] = []
         for buffer in surfaceChain {
             withSurfaceLocked { catchUpSurface(buffer, bufferOffset: bufferOffset) }
@@ -400,32 +463,56 @@ extension TerminalView {
     ///
     /// Returns the rows that had to be painted, so the caller can tell a cheap catch-up from an
     /// expensive one without a second measurement.
+    /// Only the test seam calls this. The frame path splits the two halves apart on purpose — see
+    /// `prepareSurfaceForFrame` for why doing them together is the bug this chain had.
     @discardableResult
     func catchUpSurface(_ buffer: TerminalSurfaceBuffer, bufferOffset: Int) -> Int {
-        let rowHeight = cellDimension.height
+        replayMissedScrolls(buffer)
+        return payOwedRows(buffer, bufferOffset: bufferOffset)
+    }
+
+    /// Apply the byte moves `buffer` missed, carrying its outstanding rows along with them.
+    ///
+    /// Split out from the painting because the two happen at different moments for the buffer this frame
+    /// is painting into: its scrolls are older than this frame and must be applied before this frame's
+    /// own, while its rows must be painted after, in this frame's coordinates. See `prepareSurfaceForFrame`.
+    func replayMissedScrolls(_ buffer: TerminalSurfaceBuffer) {
         for frame in buffer.pending {
             if frame.shift != 0 {
                 shiftSurfaceBytes(buffer.ctx, by: frame.shift)
-                buffer.owed = Set(buffer.owed.compactMap { row -> Int? in
-                    let moved = row - frame.shift
-                    return (moved >= 0 && moved < terminal.rows) ? moved : nil
-                })
+                buffer.owed = shiftedRows(buffer.owed, by: frame.shift)
             }
             // Added AFTER the shift, because that is the coordinate system they were recorded in.
             buffer.owed.formUnion(frame.rows)
         }
         buffer.pending.removeAll(keepingCapacity: true)
+    }
+
+    /// Paint what `buffer` owes, through the same rect the front path paints a run through.
+    ///
+    /// Painting also writes `rowsOnScreen`, which records what THE SCREEN holds. That is correct for the
+    /// buffer about to be handed over and wrong for any other, which is why the frame path pays this debt
+    /// from `renderIntoLayerSurface` — after the narrowing has read that record, and only for the buffer
+    /// being presented. See `catchUpSurface` for the one caller that is not that.
+    @discardableResult
+    func payOwedRows(_ buffer: TerminalSurfaceBuffer, bufferOffset: Int) -> Int {
         guard !buffer.owed.isEmpty else { return 0 }
         let painted = buffer.owed.count
-        for row in buffer.owed.sorted() {
-            let rect = CGRect(x: 0,
-                              y: bounds.height - CGFloat(row + 1) * rowHeight,
-                              width: bounds.width,
-                              height: rowHeight)
-            paintIntoSurface(rect.intersection(bounds), buffer.ctx, bufferOffset: bufferOffset)
+        for run in coalescedRowRuns(buffer.owed) {
+            paintIntoSurface(rowRunInvalidationRect(run).intersection(bounds), buffer.ctx,
+                             bufferOffset: bufferOffset)
         }
         buffer.owed.removeAll(keepingCapacity: true)
         return painted
+    }
+
+    /// Screen rows moved by a scroll of `shift`, dropping the ones that fell off the screen.
+    func shiftedRows(_ rows: Set<Int>, by shift: Int) -> Set<Int> {
+        guard shift != 0, !rows.isEmpty else { return rows }
+        return Set(rows.compactMap { row -> Int? in
+            let moved = row - shift
+            return (moved >= 0 && moved < terminal.rows) ? moved : nil
+        })
     }
 
     /// Move a surface's pixels by `shift` screen rows. Screen row 0 is the first row in memory, so

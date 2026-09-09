@@ -124,16 +124,32 @@ final class NarrowedInvalidationRenderTests {
     /// Deliberately NOT `cacheDisplay(in:to:)`: that requires the rep to have been created for the *same*
     /// rect, so handing it a sub-rect of a full-size rep puts the content in the wrong place — which looks
     /// exactly like ghosting and is not.
-    private func makeStore(_ view: NSView, scale: Int = 2) -> CGContext? {
+    private func makeStore(_ view: NSView, scale: Int = 2, hostOrder: Bool = false) -> CGContext? {
+        // `hostOrder` matches the surface's BGRA layout. Only needed when the store is compared against
+        // surface bytes directly: the two layouts hold the same picture with the channels in a different
+        // order, so a byte-for-byte comparison across them reports a difference on every inked pixel.
+        let order = hostOrder ? CGBitmapInfo.byteOrder32Little.rawValue : 0
         guard let ctx = CGContext(data: nil,
                                   width: Int(view.bounds.width) * scale,
                                   height: Int(view.bounds.height) * scale,
                                   bitsPerComponent: 8,
                                   bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { return nil }
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | order) else { return nil }
         ctx.scaleBy(x: CGFloat(scale), y: CGFloat(scale))
         return ctx
+    }
+
+    /// A context's pixels repacked to tight rows, so two buffers with different row padding compare as
+    /// pictures rather than as "different size".
+    private func tight(_ ctx: CGContext) -> Surface? {
+        guard let data = ctx.data else { return nil }
+        let width = ctx.width * 4
+        var out = Data(capacity: width * ctx.height)
+        for y in 0..<ctx.height {
+            out.append(Data(bytes: data.advanced(by: y * ctx.bytesPerRow), count: width))
+        }
+        return Surface(pixels: out, bytesPerRow: width, height: ctx.height)
     }
 
     /// Paint `rect` of the view into the store, leaving every other pixel as it was.
@@ -333,27 +349,74 @@ final class NarrowedInvalidationRenderTests {
         return made
     }
 
+    /// The buffer handed to the compositor on a frame must hold **that** frame's screen.
+    ///
+    /// This is the invariant flicker violates, and the one the chain exists for. The test below compares
+    /// the buffers only after everything has been caught up at the end of the corpus, and spec 27 §5.6
+    /// says why that is not enough on its own: a mid-stream mistake gets papered over by later repaints,
+    /// so the end state can agree while every frame the user saw was wrong. What the user sees is the
+    /// front buffer at the moment it is handed over — so that is what this reads, every frame.
+    ///
+    /// The reference is a lockstep view with no surface at all, repainted whole at each checkpoint: a
+    /// cold render of the same bytes, without paying for a replay-from-scratch per frame.
+    @Test(arguments: [("streaming-scroll-through-tmux.raw", 80, 24, 7),
+                      ("btop-through-tmux-sync.raw", 200, 50, 1)])
+    func theBufferPresentedEachFrameHoldsThatFrame(corpus: (fixture: String, cols: Int, rows: Int, checkEvery: Int)) throws {
+        let (fixture, cols, rows, checkEvery) = corpus
+        let view = makeView(cols: cols, rows: rows)
+        view.narrowsInvalidationToChangedRows = true
+        view.usesOwnSurface = true
+        view.blitsScrolledPixels = true
+        view.presentsViaLayerContents = true
+
+        let reference = makeView(cols: cols, rows: rows)
+        reference.narrowsInvalidationToChangedRows = true
+        reference.usesOwnSurface = false
+        reference.blitsScrolledPixels = false
+        let refStore = try #require(makeStore(reference, hostOrder: true))
+
+        var presented: Set<Int> = []
+        for (index, frame) in try frames(fixture).enumerated() {
+            view.terminal.feed(byteArray: frame)
+            view.updateDisplay(notifyAccessibility: false)
+            reference.terminal.feed(byteArray: frame)
+            reference.updateDisplay(notifyAccessibility: false)
+            presented.insert(view.surfaceChainIndex)
+            // A checkpoint costs a full repaint of the reference plus a whole-image comparison, and the
+            // scrolling capture is 1751 frames. Every seventh is the same cadence
+            // `blittingScrolledPixelsMatchesRepaintingThem` settled on, and a wrong buffer does not heal
+            // itself: the narrowing believes those rows are current, so the divergence stands until
+            // something else happens to repaint them.
+            guard index % checkEvery == 0 else { continue }
+
+            paint(reference, reference.bounds, into: refStore)
+            let front = try #require(view.surfacePixelsForTesting)
+            let expected = try #require(tight(refStore))
+            let diff = worstDifference(Surface(pixels: front.bytes, bytesPerRow: front.bytesPerRow,
+                                               height: front.height),
+                                       expected)
+            #expect(diff.beyondHair == 0,
+                    "第 \(index) 幀交給合成器的 buffer（chain #\(view.surfaceChainIndex)）不是這一幀的畫面（\(fixture)）：最大差 \(diff.maxDelta)，\(differingRows(Surface(pixels: front.bytes, bytesPerRow: front.bytesPerRow, height: front.height), expected))")
+            if diff.beyondHair > 0 { return }   // one named frame is the lead; the rest are its echo
+        }
+        // Without this the loop above could have read the same buffer every frame, which is B2 before the
+        // chain existed — and that configuration is exactly the one that flickered.
+        #expect(presented.count == TerminalView.surfaceChainLength,
+                "整份語料只用到 \(presented.count) 張 buffer，chain 沒有輪替，這條測試等於在測單緩衝")
+    }
+
     /// Every buffer in the swap chain must hold the same picture once caught up.
     ///
     /// Core Animation is handed a different buffer each frame, so a buffer that is behind is a frame the
     /// user sees wrong — which is what flicker IS. Reading only the buffer painted last (as the test
     /// below does) cannot see that.
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTTERM_SWAP_CHAIN"] == "1",
-                   "swap chain 未完成——設 SWIFTTERM_SWAP_CHAIN=1 看它現在錯在哪"),
-          arguments: [("streaming-scroll-through-tmux.raw", 80, 24)])
+    @Test(arguments: [("streaming-scroll-through-tmux.raw", 80, 24)])
     func everySurfaceInTheChainAgreesOnceCaughtUp(corpus: (fixture: String, cols: Int, rows: Int)) throws {
-        // ⚠ **This currently FAILS, on purpose left in reach.** The swap chain is unfinished: buffers 1
-        // and 2 disagree with buffer 0 after catch-up by tens of thousands of pixels, which is precisely
-        // the flicker it was written to prevent. It is gated rather than deleted because it is the only
-        // thing that can tell anyone whether the chain is right, and because a green suite must not
-        // imply a working chain. `presentsViaLayerContents` is off, so nothing ships on this.
-        //
-        // Two candidates not yet ruled out, in order of suspicion:
-        //  1. `catchUpSurface` paints through `drawTerminalContents`, which also writes the GLOBAL
-        //     `rowsOnScreen` record and prunes the row cache — so catching up an idle buffer mutates the
-        //     bookkeeping the next frame's narrowing depends on.
-        //  2. The presented buffer paints `invalidationRect(run)`, which pads a run by another cell;
-        //     the idle buffers only record the unpadded rows, so they under-paint at run edges.
+        // This reads the END state, so on its own it is the weaker of the two chain guards — spec 27 §5.6
+        // on why an end-state comparison can agree while every frame the user saw was wrong.
+        // `theBufferPresentedEachFrameHoldsThatFrame` is the per-frame one. Both are kept: this one names
+        // the buffers that drifted apart, which is the shape of the answer when the bookkeeping is wrong,
+        // and it is cheap.
         let (fixture, cols, rows) = corpus
         let view = makeView(cols: cols, rows: rows)
         view.narrowsInvalidationToChangedRows = true

@@ -1880,7 +1880,7 @@ extension TerminalView {
         #if os(macOS)
         if coreTextPath {
             // Choose and catch up the surface for this frame BEFORE the scroll is applied to it.
-            prepareSurfaceForFrame(bufferOffset: terminal.displayBuffer.yDisp)
+            prepareSurfaceForFrame()
             blitted = blitScrolledPixels()
         }
         #endif
@@ -1903,34 +1903,11 @@ extension TerminalView {
             }
         }
 
-        let baseLine = frame.height
         // Every run gets exactly the rect the single band used to get — including both edge allowances,
-        // so a run is never covered less than the band that contained it was.
-        func invalidationRect(_ run: ClosedRange<Int>) -> CGRect {
-            let paintStart = run.lowerBound
-            let paintEnd = run.upperBound
-            var region = CGRect (x: 0,
-                                 y: baseLine - (cellDimension.height + CGFloat(paintEnd) * cellDimension.height),
-                                 width: frame.width,
-                                 height: CGFloat(paintEnd-paintStart + 1) * cellDimension.height)
-
-            // If we are the last line, we should also queue a refresh for the "remaining" bits at the
-            // end which can be redrawn by large unicode
-            if paintEnd == terminal.rows - 1 {
-                let oh = region.height
-                let oy = region.origin.y
-                region = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
-            } else {
-                // Region ends mid-screen (a restricted DECSTBM region): extend the
-                // invalidation down by one cell so the sub-cell remainder just below the
-                // band's bottom row (descenders / tall unicode) is cleared too. Previously
-                // only rowEnd == rows-1 got this, leaving a one-row ghost below the region.
-                let extra = cellDimension.height
-                let newY = max (0, region.origin.y - extra)
-                region = CGRect (x: 0, y: newY, width: frame.width, height: region.maxY - newY)
-            }
-            return region
-        }
+        // so a run is never covered less than the band that contained it was. The rect itself is defined
+        // once, in `rowRunInvalidationRect`: a swap-chain buffer replaying a recorded run has to paint
+        // precisely as much as the front buffer did, or the two disagree at the run's edges.
+        let invalidationRect = rowRunInvalidationRect
 #if canImport(MetalKit)
         if metalView != nil {
             let buffer = terminal.displayBuffer

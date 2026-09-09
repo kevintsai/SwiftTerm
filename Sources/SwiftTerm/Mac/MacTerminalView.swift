@@ -446,7 +446,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// at creation, never around the per-frame writes, so the compositor was never told the memory it
     /// samples was being rewritten. Correctness of the pixels was pinned; correctness of the *timing*
     /// was not tested and cannot be — nothing offline can see a torn frame.
-    var usesOwnSurface = false
+    ///
+    /// **On again (2026-09-10)**: the swap chain that replaces the single buffer is finished and guarded
+    /// by `theBufferPresentedEachFrameHoldsThatFrame`, which reads the buffer handed to the compositor on
+    /// each frame rather than the picture left at the end. It found the chain wrong from frame 3 of the
+    /// scrolling corpus, and that is what got fixed. Whether the flicker is gone is still a question only
+    /// a person looking at the screen can answer.
+    var usesOwnSurface = true
 
     /// Move the pixels a scroll only displaced, instead of re-rendering them. Requires `usesOwnSurface`.
     /// `false` is the control arm, and the shape the renderer had before this landed.
@@ -488,8 +494,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// benchmark's control arm painted into a plain bitmap while the real one paints into AppKit's
     /// store (spec 27 §4).
     ///
-    /// Off with `usesOwnSurface` — see there for what the app reported and what has to be fixed first.
-    var presentsViaLayerContents = false
+    /// On with `usesOwnSurface` — see there for the measurement, the flicker, and what the swap chain in
+    /// `MacTerminalSurface.swift` had to get right before this could come back.
+    var presentsViaLayerContents = true
 
     /// The owned backing store and the geometry it was made for. See `ensureSurface()`.
     var surface: CGContext?
