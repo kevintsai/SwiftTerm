@@ -1961,10 +1961,12 @@ extension TerminalView {
         } else {
             queueSurfacePaintAndInvalidate(paintRuns, nothingChanged: nothingChanged, blitted: blitted,
                                            rect: invalidationRect)
+            renderIntoLayerSurface(bufferOffset: terminal.displayBuffer.yDisp)
         }
 #else
         queueSurfacePaintAndInvalidate(paintRuns, nothingChanged: nothingChanged, blitted: blitted,
                                        rect: invalidationRect)
+        renderIntoLayerSurface(bufferOffset: terminal.displayBuffer.yDisp)
 #endif
         #else
         // TODO iOS: need to update the code above, but will do that when I get some real

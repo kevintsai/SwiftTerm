@@ -178,6 +178,7 @@ final class NarrowedInvalidationRenderTests {
     /// Set by the most recent `incremental(...)`. See `blittingScrolledPixelsMatchesRepaintingThem`.
     private var lastBlits: (frames: Int, rows: Int) = (0, 0)
     private var lastPaintRows = 0
+    private var scratchStores: [ObjectIdentifier: CGContext] = [:]
 
     /// Replay the corpus twice in lockstep — blit off and blit on — comparing every `checkEvery` frames.
     ///
@@ -293,6 +294,56 @@ final class NarrowedInvalidationRenderTests {
         let narrowedDiff = worstDifference(narrowed, reference)
         let narrowedWhy = "只重畫變動列之後有東西留著舊內容（\(fixture)）：最大差 \(narrowedDiff.maxDelta)，\(differingRows(narrowed, reference))"
         #expect(narrowedDiff.beyondHair == 0, "\(narrowedWhy)")
+    }
+
+    /// Replay into the view's own surface, reading the surface rather than what reached the screen.
+    /// B2 renders from `updateDisplay` and never goes through `draw(_:)`, so the drawing-capture harness
+    /// used everywhere else in this file is blind to it.
+    private func surfaceAfterReplay(_ fixture: String, cols: Int, rows: Int,
+                                    viaLayerContents: Bool) throws -> Surface? {
+        let view = makeView(cols: cols, rows: rows)
+        view.narrowsInvalidationToChangedRows = true
+        view.usesOwnSurface = true
+        view.blitsScrolledPixels = true
+        view.presentsViaLayerContents = viaLayerContents
+        if !viaLayerContents {
+            guard let store = makeStore(view) else { return nil }
+            paint(view, view.bounds, into: store)
+        }
+        for frame in try frames(fixture) {
+            view.invalidated.removeAll()
+            view.terminal.feed(byteArray: frame)
+            view.updateDisplay(notifyAccessibility: false)
+            if !viaLayerContents, let store = view.surface {
+                _ = store   // B1 paints during draw; drive it the same way the screen would
+                for rect in view.invalidated { paint(view, rect.intersection(view.bounds), into: makeStoreOnce(view)) }
+            }
+        }
+        guard let px = view.surfacePixelsForTesting else { return nil }
+        return Surface(pixels: px.bytes, bytesPerRow: px.bytesPerRow, height: px.height)
+    }
+
+    /// One store per view, created lazily — the B1 arm needs somewhere for `draw` to present into, but
+    /// what is compared is the surface, not the store.
+    private func makeStoreOnce(_ view: NSView) -> CGContext {
+        if let existing = scratchStores[ObjectIdentifier(view)] { return existing }
+        let made = makeStore(view)!
+        scratchStores[ObjectIdentifier(view)] = made
+        return made
+    }
+
+    /// Handing the layer our surface must paint the same pixels as presenting it by hand.
+    ///
+    /// The B1 arm is the control and is already pinned equal to a cold render, so equality here is
+    /// equality with a cold render — without needing a harness that can see a path which never draws.
+    @Test(arguments: [("streaming-scroll-through-tmux.raw", 80, 24)])
+    func theLayerBackedSurfaceHoldsTheSamePixels(corpus: (fixture: String, cols: Int, rows: Int)) throws {
+        let (fixture, cols, rows) = corpus
+        let byHand = try #require(try surfaceAfterReplay(fixture, cols: cols, rows: rows, viaLayerContents: false))
+        let byLayer = try #require(try surfaceAfterReplay(fixture, cols: cols, rows: rows, viaLayerContents: true))
+        let diff = worstDifference(byHand, byLayer)
+        #expect(diff.beyondHair == 0,
+                "交給 layer 的 surface 內容與自己貼的不同（\(fixture)）：最大差 \(diff.maxDelta)，\(differingRows(byLayer, byHand))")
     }
 
     /// Moving the pixels a scroll displaced must land them exactly where re-rendering them would have.

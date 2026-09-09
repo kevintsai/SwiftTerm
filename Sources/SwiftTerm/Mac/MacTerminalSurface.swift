@@ -37,6 +37,16 @@ extension TerminalView {
         }
         let pixelWidth = Int((size.width * scale).rounded())
         let pixelHeight = Int((size.height * scale).rounded())
+
+        if presentsViaLayerContents, let made = makeLayerBackedSurface(pixelWidth, pixelHeight, scale) {
+            surface = made
+            surfaceSize = size
+            surfaceScale = scale
+            surfaceNeedsFullRepaint = true
+            forgetRowsOnScreen()
+            return (made, true)
+        }
+
         guard pixelWidth > 0, pixelHeight > 0,
               let ctx = CGContext(data: nil,
                                   width: pixelWidth,
@@ -196,6 +206,81 @@ extension TerminalView {
             // not repainted. Skipping this is precisely the ghosting bug this design has to avoid.
             setNeedsDisplay(bounds)
         }
+    }
+}
+
+extension TerminalView {
+    /// A surface the compositor samples directly: an `IOSurface` with a `CGContext` over its memory.
+    ///
+    /// No copy anywhere in the frame — not `makeImage()`, not a blit into the view's context. The layer
+    /// is told to stop managing its own contents (`.never`), because the contents are ours now.
+    ///
+    /// Single-buffered on purpose. Double buffering would mean copying the front buffer into the back
+    /// one every frame to keep incremental painting valid, which is the very cost this exists to remove.
+    /// The exposure is a torn frame if the compositor samples mid-paint; a terminal repaints the torn
+    /// rows on the next frame anyway, and the alternative gives back the entire win.
+    func makeLayerBackedSurface(_ pixelWidth: Int, _ pixelHeight: Int, _ scale: CGFloat) -> CGContext? {
+        guard pixelWidth > 0, pixelHeight > 0, let layer else { return nil }
+        guard let io = IOSurface(properties: [
+            .width: pixelWidth,
+            .height: pixelHeight,
+            .bytesPerElement: 4,
+            .pixelFormat: UInt32(0x42475241),   // 'BGRA', the layout CoreGraphics has fast paths for
+        ]) else { return nil }
+        io.lock(options: [], seed: nil)
+        let ctx = CGContext(data: io.baseAddress,
+                            width: pixelWidth,
+                            height: pixelHeight,
+                            bitsPerComponent: 8,
+                            bytesPerRow: io.bytesPerRow,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                | CGBitmapInfo.byteOrder32Little.rawValue)
+        io.unlock(options: [], seed: nil)
+        guard let ctx else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+        surfaceIOSurface = io
+        layerContentsRedrawPolicy = .never
+        layer.contentsScale = scale
+        layer.contents = io
+        return ctx
+    }
+
+    /// Paint whatever is outstanding into the surface and let the compositor know it changed.
+    ///
+    /// Called from `updateDisplay` rather than from `draw(_:)`: with `.never` AppKit no longer asks us
+    /// to draw, because it is not managing these pixels any more.
+    func renderIntoLayerSurface(bufferOffset: Int) {
+        guard presentsViaLayerContents, usesOwnSurface else { return }
+        guard let (ctx, isFresh) = ensureSurface() else { return }
+        let full = isFresh || surfaceNeedsFullRepaint
+        let toPaint = full ? [bounds] : pendingSurfacePaint
+        surfaceNeedsFullRepaint = false
+        pendingSurfacePaint.removeAll(keepingCapacity: true)
+        surfaceMovedPixelsThisCycle = false
+        guard !toPaint.isEmpty else { return }
+        for r in toPaint {
+            paintIntoSurface(r.intersection(bounds), ctx, bufferOffset: bufferOffset)
+        }
+        // Re-assigning is how CA is told this surface holds a new frame; it does not copy it.
+        layer?.contents = surfaceIOSurface
+    }
+}
+
+extension TerminalView {
+    /// The surface's pixels, for tests that need to compare what was painted rather than what reached
+    /// the screen — B2 never goes through `draw(_:)`, so a harness that captures drawing sees nothing.
+    /// Repacked to tight rows on the way out: an `IOSurface` and a `CGBitmapContext` pad their rows
+    /// differently, so raw buffers of the same image are not the same length and comparing them
+    /// reports "different size" instead of "different picture".
+    var surfacePixelsForTesting: (bytes: Data, bytesPerRow: Int, height: Int)? {
+        guard let ctx = surface, let data = ctx.data else { return nil }
+        let tight = ctx.width * 4
+        var out = Data(capacity: tight * ctx.height)
+        for y in 0..<ctx.height {
+            out.append(Data(bytes: data.advanced(by: y * ctx.bytesPerRow), count: tight))
+        }
+        return (out, tight, ctx.height)
     }
 }
 

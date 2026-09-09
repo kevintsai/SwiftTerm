@@ -11,6 +11,7 @@
 #if os(macOS)
 import Foundation
 import AppKit
+import IOSurface
 import CoreText
 import CoreGraphics
 import Carbon.HIToolbox
@@ -433,7 +434,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// bitmap; the real baseline paints into AppKit's store, which is much faster. Removing the present
     /// (handing the surface to `layer.contents` instead of drawing it) is the route that could make this
     /// pay, and it has to be measured against the RIGHT baseline before it is turned on again.
-    var usesOwnSurface = false
+    ///
+    /// That route is now built (`presentsViaLayerContents`), so this is on again — as a MEASUREMENT, not
+    /// a conclusion. With the layer sampling our surface there is no present left to pay for; whether
+    /// that is enough is a question only the running app answers, and flipping both flags back is a
+    /// two-line change.
+    var usesOwnSurface = true
 
     /// Move the pixels a scroll only displaced, instead of re-rendering them. Requires `usesOwnSurface`.
     /// `false` is the control arm, and the shape the renderer had before this landed.
@@ -463,8 +469,25 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// because AppKit's own backing store did not scroll with us.
     var pendingSurfacePaint: [CGRect] = []
 
+    /// Let the layer's contents BE the surface, instead of drawing the surface into the view each frame.
+    ///
+    /// This is the whole point of B2. B1 lost because AppKit's backing store does not scroll with us, so
+    /// after moving pixels inside our bitmap the entire thing still had to be drawn to the screen every
+    /// frame — 6.5% of one core, more than the blit saved. When the layer's contents are the surface
+    /// there is nothing to present: the compositor samples the same memory we painted into.
+    ///
+    /// Requires `usesOwnSurface`. **On so that it can be measured in the app** — the only place this
+    /// question can be settled: B1's offline benchmark said +68% and the app said -44%, because the
+    /// benchmark's control arm painted into a plain bitmap while the real one paints into AppKit's
+    /// store (spec 27 §4).
+    var presentsViaLayerContents = true
+
     /// The owned backing store and the geometry it was made for. See `ensureSurface()`.
     var surface: CGContext?
+    /// Backing memory for `surface` when the layer is sampling it directly. See `presentsViaLayerContents`.
+    var surfaceIOSurface: IOSurface?
+    /// Set by anything that invalidates content without going through `updateDisplay` (font, geometry).
+    var surfaceNeedsFullRepaint = true
     var surfaceSize: CGSize = .zero
     var surfaceScale: CGFloat = 0
 
