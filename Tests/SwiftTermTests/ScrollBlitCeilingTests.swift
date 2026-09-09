@@ -77,12 +77,30 @@ final class ScrollBlitCeilingTests: XCTestCase {
         var draws = 0
     }
 
-    /// `oracle == false` → paint what the view asks for. `true` → paint only rows whose content is new.
-    private func replay(oracle: Bool, coalesce: Int = 1) throws -> Arm {
+    private enum Mode {
+        /// Paint every row the view asks for — what happens today.
+        case today
+        /// Paint only rows whose content is new, and move nothing. Physically wrong; the ceiling.
+        case oracle
+        /// What B1 would really do: shift the surface, paint only the new rows, then present the
+        /// whole surface (AppKit's own backing store did not scroll, so the screen still needs all
+        /// of it). Both of those costs are real and neither is in `oracle`.
+        case b1
+    }
+
+    /// `mode` decides which of the three cost models is being timed. See ``Mode``.
+    private func replay(mode: Mode, coalesce: Int = 1) throws -> Arm {
+        let oracle = mode != .today
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 384))
         let terminal: Terminal = view.terminal
         terminal.resize(cols: 80, rows: 24)
         guard let store = makeStore(view) else { throw XCTSkip("no bitmap context") }
+        // Stands in for the window's backing store, so "present the surface" is a real copy.
+        guard let screen = makeStore(view) else { throw XCTSkip("no bitmap context") }
+        let rowBytes = store.bytesPerRow
+        let rowPixels = Int((view.bounds.height / CGFloat(terminal.rows)).rounded()) * 2  // scale 2
+        // What the surface currently shows at each screen row, so a uniform shift is detectable.
+        var onSurface: [Int: ObjectIdentifier] = [:]
 
         var arm = Arm()
         // Content already on screen, keyed by LINE — the record blitting would keep.
@@ -101,6 +119,20 @@ final class ScrollBlitCeilingTests: XCTestCase {
             arm.draws += 1
             let buffer = terminal.displayBuffer
 
+            // How far the visible content moved, by line identity — the signal B1 would blit on.
+            var shift = 0
+            if mode == .b1 {
+                var votes: [Int: Int] = [:]
+                for y in 0..<terminal.rows {
+                    let absolute = buffer.yDisp + y
+                    guard absolute >= 0, absolute < buffer.lines.count else { continue }
+                    let id = ObjectIdentifier(buffer.lines[absolute])
+                    for (prevY, prevId) in onSurface where prevId == id {
+                        votes[y - prevY, default: 0] += 1
+                    }
+                }
+                shift = votes.filter { $0.key != 0 }.max(by: { $0.value < $1.value })?.key ?? 0
+            }
             var screenRows: [Int] = []
             for run in runs {
                 for y in run {
@@ -115,10 +147,29 @@ final class ScrollBlitCeilingTests: XCTestCase {
                     screenRows.append(y)
                 }
             }
+            if mode == .b1 {
+                onSurface.removeAll(keepingCapacity: true)
+                for y in 0..<terminal.rows {
+                    let absolute = buffer.yDisp + y
+                    guard absolute >= 0, absolute < buffer.lines.count else { continue }
+                    onSurface[y] = ObjectIdentifier(buffer.lines[absolute])
+                }
+            }
             guard !screenRows.isEmpty else { continue }
             arm.rowsPainted += screenRows.count
 
             let started = ProcessInfo.processInfo.systemUptime
+            if mode == .b1 {
+                // 1) move the pixels that only scrolled. A real implementation memmoves inside its own
+                //    bitmap; the cost is the same whichever direction it goes.
+                if let data = store.data, shift != 0 {
+                    let moved = max(0, (terminal.rows - abs(shift))) * rowPixels * rowBytes
+                    let offset = abs(shift) * rowPixels * rowBytes
+                    if moved > 0, offset + moved <= rowBytes * store.height {
+                        memmove(data.advanced(by: offset), data, moved)
+                    }
+                }
+            }
             for y in screenRows {
                 let rect = NSRect(x: 0,
                                   y: view.bounds.height - CGFloat(y + 1) * rowHeight,
@@ -126,8 +177,13 @@ final class ScrollBlitCeilingTests: XCTestCase {
                                   height: rowHeight)
                 paint(view, rect, into: store)
             }
+            if mode == .b1, let image = store.makeImage() {
+                // 2) present: the view's backing store never scrolled, so the whole surface goes up.
+                screen.draw(image, in: view.bounds)
+            }
             arm.seconds += ProcessInfo.processInfo.systemUptime - started
         }
+        _ = onSurface
         return arm
     }
 
@@ -136,27 +192,32 @@ final class ScrollBlitCeilingTests: XCTestCase {
                           "measurement only; set SWIFTTERM_BLIT_CEILING=1 to run")
         let runs = Int(ProcessInfo.processInfo.environment["SWIFTTERM_BLIT_RUNS"] ?? "") ?? 3
         for coalesce in [1, 3, 5] {
-        var today: [Double] = [], oracle: [Double] = []
-        var t = Arm(), o = Arm()
+        var today: [Double] = [], oracle: [Double] = [], b1: [Double] = []
+        var t = Arm(), o = Arm(), b = Arm()
         for _ in 0..<runs {
-            t = try replay(oracle: false, coalesce: coalesce); today.append(t.seconds * 1000)
-            o = try replay(oracle: true, coalesce: coalesce);  oracle.append(o.seconds * 1000)
+            t = try replay(mode: .today, coalesce: coalesce); today.append(t.seconds * 1000)
+            o = try replay(mode: .oracle, coalesce: coalesce); oracle.append(o.seconds * 1000)
+            b = try replay(mode: .b1, coalesce: coalesce);     b1.append(b.seconds * 1000)
         }
-        today.sort(); oracle.sort()
-        let tm = today[today.count / 2], om = oracle[oracle.count / 2]
+        today.sort(); oracle.sort(); b1.sort()
+        let tm = today[today.count / 2], om = oracle[oracle.count / 2], bm = b1[b1.count / 2]
         print("  ── \(coalesce) tmux update(s) per draw ──")
         print(String(format: """
 
         ── what scroll blitting could save on the paint side (80x24, real tmux capture) ──
           TODAY  : %8.1f ms  %6d rows over %4d draws (%.1f rows/draw)
           ORACLE : %8.1f ms  %6d rows over %4d draws (%.1f rows/draw)
-          paint saving ceiling : %.0f%%   (rows: %.1fx fewer)
+          B1     : %8.1f ms  %6d rows  (shift + paint new + present whole surface)
+          ceiling (ORACLE, ignores the surface move) : %.0f%%   (rows: %.1fx fewer)
+          REALISTIC (B1, includes it)               : %.0f%%
           ⚠ excludes the per-frame cost of actually moving the surface, which blitting must add.
         ──────────────────────────────────────────────────────────────────────────────────
 
         """, tm, t.rowsPainted, t.draws, Double(t.rowsPainted) / Double(max(t.draws, 1)),
              om, o.rowsPainted, o.draws, Double(o.rowsPainted) / Double(max(o.draws, 1)),
-             (tm - om) / tm * 100, Double(t.rowsPainted) / Double(max(o.rowsPainted, 1))))
+             bm, b.rowsPainted,
+             (tm - om) / tm * 100, Double(t.rowsPainted) / Double(max(o.rowsPainted, 1)),
+             (tm - bm) / tm * 100))
         }
     }
 }
