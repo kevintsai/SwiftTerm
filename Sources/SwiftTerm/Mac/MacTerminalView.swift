@@ -412,14 +412,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// **control arm**. That test emulates a backing store by repainting only the invalidated rect into a
     /// persistent bitmap, and a green result would mean nothing if the emulation itself were wrong. So it
     /// runs the same corpus twice — narrowing off, then on — and both must equal a cold full render.
-    var narrowsInvalidationToChangedRows = true
+    public var narrowsInvalidationToChangedRows = true
     /// Ask for **one rect per run of changed rows** instead of one band spanning the outermost two.
     ///
     /// The band is what a single `setNeedsDisplay` can express, and a full-screen TUI that touches its
     /// top and its bottom in the same frame makes that band the whole pane — every frame. Splitting the
     /// ask keeps the untouched middle out of the dirty region and out of the backing-store update that
     /// follows it. `false` restores the single-band behaviour, which is how the benchmark runs both arms.
-    var splitsInvalidationIntoRuns = true
+    public var splitsInvalidationIntoRuns = true
     /// Paint into a bitmap this view owns, then put that bitmap on screen, instead of painting straight
     /// into AppKit's backing store. See `MacTerminalSurface.swift` for why the view has to own one.
     /// `false` is the control arm the render tests need — and the fallback if a surface cannot be made.
@@ -452,11 +452,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// each frame rather than the picture left at the end. It found the chain wrong from frame 3 of the
     /// scrolling corpus, and that is what got fixed. Whether the flicker is gone is still a question only
     /// a person looking at the screen can answer.
-    var usesOwnSurface = true
+    public var usesOwnSurface = true
 
     /// Move the pixels a scroll only displaced, instead of re-rendering them. Requires `usesOwnSurface`.
     /// `false` is the control arm, and the shape the renderer had before this landed.
-    var blitsScrolledPixels = true
+    public var blitsScrolledPixels = true
 
     /// How many frames actually moved pixels, and how many rows they moved in total. Without these a
     /// green pixel-comparison proves nothing: a blit that never fires matches a repaint trivially.
@@ -496,7 +496,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     ///
     /// On with `usesOwnSurface` — see there for the measurement, the flicker, and what the swap chain in
     /// `MacTerminalSurface.swift` had to get right before this could come back.
-    var presentsViaLayerContents = true
+    public var presentsViaLayerContents = true
 
     /// The owned backing store and the geometry it was made for. See `ensureSurface()`.
     var surface: CGContext?
