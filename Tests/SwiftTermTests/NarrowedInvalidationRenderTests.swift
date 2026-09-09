@@ -405,6 +405,86 @@ final class NarrowedInvalidationRenderTests {
                 "整份語料只用到 \(presented.count) 張 buffer，chain 沒有輪替，這條測試等於在測單緩衝")
     }
 
+    /// Switching the render path has to put the view back into a state where the NEXT frame is painted.
+    ///
+    /// ⚠ **What this can and cannot see.** The thing that actually breaks when the teardown is wrong is
+    /// `layerContentsRedrawPolicy`: left at `.never`, AppKit stops asking the view to draw and the
+    /// terminal sits frozen on its last frame. **No pixel test in this file can see that** — the harness
+    /// paints through `displayIgnoringOpacity`, which draws whatever it is told to regardless of the
+    /// policy. Verified, not assumed: deleting the policy line leaves every pixel comparison green.
+    /// Same family as the flicker in spec 27 §5.6 — the offline world cannot observe when, or whether,
+    /// the system decides to ask.
+    ///
+    /// So this asserts the **state** instead, which is the part that is observable here, and the pixel
+    /// pass below it is a smoke test (it says the view still renders; it does not say the switch is
+    /// right). The real-app half is: switch arms in a running app and check it still updates.
+    @Test func switchingTheRenderPathResetsWhatTheOldPathOwned() throws {
+        let view = makeView(cols: 40, rows: 12)
+
+        view.applyRenderPath(ownsSurface: true, blitsScrolled: true, viaLayerContents: true)
+        view.terminal.feed(text: "hello\r\n")
+        view.updateDisplay(notifyAccessibility: false)
+        #expect(view.layerContentsRedrawPolicy == .never, "layer 路徑沒有接管 contents，B2 等於沒開")
+        #expect(!view.surfaceChain.isEmpty, "swap chain 沒有建起來")
+        // 下面「切換後記錄要清空」那條斷言的前提：現在得真的有記錄，否則它是恆真的。
+        #expect(!view.rowsOnScreen.isEmpty, "切換前就沒有任何 rowsOnScreen 記錄，後面那條斷言等於沒測")
+
+        view.applyRenderPath(ownsSurface: false, blitsScrolled: false, viaLayerContents: false)
+        #expect(view.layerContentsRedrawPolicy == .duringViewResize,
+                "切回 AppKit 後 policy 還是 .never——AppKit 不會再要求這個 view 畫，畫面會凍在最後一幀")
+        #expect(view.surfaceChain.isEmpty, "舊的 swap chain 沒有丟掉")
+        #expect(view.layer?.contents == nil, "layer 還抓著上一條路徑的 IOSurface")
+        #expect(view.surface == nil, "舊的 surface 還在，下一幀會畫進沒人看的記憶體")
+        #expect(view.rowsOnScreen.isEmpty, "沿用了上一條路徑的「螢幕上有什麼」記錄，收斂會跳過該畫的列")
+
+        view.applyRenderPath(ownsSurface: true, blitsScrolled: true, viaLayerContents: true)
+        view.terminal.feed(text: "world\r\n")
+        view.updateDisplay(notifyAccessibility: false)
+        #expect(view.layerContentsRedrawPolicy == .never, "切回 surface 路徑沒有重新接管 contents")
+        #expect(!view.surfaceChain.isEmpty, "切回 surface 路徑沒有重建 swap chain")
+    }
+
+    /// Smoke test: a view that changed paths mid-corpus still renders the corpus.
+    ///
+    /// Not a guard — see `switchingTheRenderPathResetsWhatTheOldPathOwned` for what is actually pinned
+    /// and why. This exists to catch the coarse failures (a crash, a torn-down surface being written to,
+    /// a path that paints nothing at all), which are the ones worth finding cheaply.
+    @Test(arguments: [("streaming-scroll-through-tmux.raw", 80, 24), ("btop-through-tmux-sync.raw", 200, 50)])
+    func aViewThatChangedPathsMidStreamStillRenders(corpus: (fixture: String, cols: Int, rows: Int)) throws {
+        let (fixture, cols, rows) = corpus
+        let expected = try #require(try coldSurfacePixels(fixture, cols: cols, rows: rows))
+        let all = try frames(fixture)
+
+        let view = makeView(cols: cols, rows: rows)
+        view.narrowsInvalidationToChangedRows = true
+        view.applyRenderPath(ownsSurface: false, blitsScrolled: false, viaLayerContents: false)
+        for (i, frame) in all.enumerated() {
+            if i == all.count / 2 {
+                view.applyRenderPath(ownsSurface: true, blitsScrolled: true, viaLayerContents: true)
+            }
+            view.terminal.feed(byteArray: frame)
+            view.updateDisplay(notifyAccessibility: false)
+        }
+        let px = try #require(view.surfacePixelsForTesting)
+        let got = Surface(pixels: px.bytes, bytesPerRow: px.bytesPerRow, height: px.height)
+        let diff = worstDifference(got, expected)
+        #expect(diff.beyondHair == 0,
+                "appkit → surface 之後畫面不對（\(fixture)）：最大差 \(diff.maxDelta)，\(differingRows(got, expected))")
+    }
+
+    /// A cold render read back in the surface's own byte layout, for arms that never reach `draw(_:)`.
+    private func coldSurfacePixels(_ fixture: String, cols: Int, rows: Int) throws -> Surface? {
+        let view = makeView(cols: cols, rows: rows)
+        view.applyRenderPath(ownsSurface: false, blitsScrolled: false, viaLayerContents: false)
+        for frame in try frames(fixture) {
+            view.terminal.feed(byteArray: frame)
+            view.updateDisplay(notifyAccessibility: false)
+        }
+        guard let store = makeStore(view, hostOrder: true) else { return nil }
+        paint(view, view.bounds, into: store)
+        return tight(store)
+    }
+
     /// Every buffer in the swap chain must hold the same picture once caught up.
     ///
     /// Core Animation is handed a different buffer each frame, so a buffer that is behind is a frame the

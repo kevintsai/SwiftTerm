@@ -251,6 +251,43 @@ extension TerminalView {
 }
 
 extension TerminalView {
+    /// Switch the render path at runtime, tearing down whatever the previous one owned.
+    ///
+    /// The three flags cannot simply be assigned: turning the layer path OFF leaves
+    /// `layerContentsRedrawPolicy == .never` and an `IOSurface` sitting in `layer.contents`, and AppKit
+    /// never asks a view with that policy to draw — so the terminal would freeze on its last frame.
+    /// Turning it ON while a stale bitmap surface exists is the mirror image. Both directions have to put
+    /// the view back into a state where the next frame is painted from scratch, which is why this is one
+    /// entry point rather than three settable properties.
+    ///
+    /// Being able to move between the paths **in a running app, without relaunching it**, is the point:
+    /// the only trustworthy comparison is one binary on one machine under one load with a single variable
+    /// moved, and a relaunch changes the panes, the load, and the caches along with it.
+    public func applyRenderPath(ownsSurface: Bool, blitsScrolled: Bool, viaLayerContents: Bool) {
+        let unchanged = usesOwnSurface == ownsSurface
+            && blitsScrolledPixels == blitsScrolled
+            && presentsViaLayerContents == viaLayerContents
+        usesOwnSurface = ownsSurface
+        blitsScrolledPixels = blitsScrolled
+        presentsViaLayerContents = viaLayerContents
+        guard !unchanged else { return }
+
+        surfaceChain.removeAll(keepingCapacity: false)
+        surfaceChainIndex = 0
+        surfaceIOSurface = nil
+        surface = nil
+        surfaceSize = .zero
+        surfaceScale = 0
+        pendingSurfacePaint.removeAll(keepingCapacity: false)
+        surfaceMovedPixelsThisCycle = false
+        surfaceNeedsFullRepaint = true
+        // Nothing on screen can be vouched for: the pixels are about to come from somewhere else.
+        forgetRowsOnScreen()
+        layer?.contents = nil
+        layerContentsRedrawPolicy = viaLayerContents ? .never : .duringViewResize
+        setNeedsDisplay(bounds)
+    }
+
     /// A surface the compositor samples directly: an `IOSurface` with a `CGContext` over its memory.
     ///
     /// No copy anywhere in the frame — not `makeImage()`, not a blit into the view's context. The layer
