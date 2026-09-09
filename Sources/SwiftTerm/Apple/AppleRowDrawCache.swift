@@ -15,6 +15,16 @@
 //  `BufferLine.generation` already exists for exactly this — the Metal renderer has used it to cache
 //  per-row draw data since it landed. This file gives the CoreText path the same treatment.
 //
+//  The table is keyed by the LINE, not by the row number it is sitting at. That distinction is the
+//  whole value of the cache on a streaming pane: a terminal that scrolls moves content *between* row
+//  numbers, so a position-keyed table misses every row of every scrolled frame while the text on
+//  screen is largely identical. Measured in fleetmux (2026-09-09) with four panes streaming: shaping
+//  was 10.2% of one core out of ~33% total, and `RowDrawCacheScrollTests` shows why — 0 of 10
+//  unchanged rows survived one scroll. The position-keyed version looked fine in every benchmark:
+//  `lines.push` keeps absolute indices stable, so the miss only appears once the line list is full and
+//  `Terminal.scroll` switches to `lines.recycle()` — which for an alt-screen buffer (what `tmux
+//  attach` puts us in) is from the very first scroll.
+//
 //  The whole correctness question is the cache KEY: `buildAttributedString` reads more than the
 //  line's bytes, and anything it reads that is not in the key becomes a stale-glyph bug. See
 //  ``RowDrawKey`` for the inventory.
@@ -92,14 +102,21 @@ struct RowOnScreen {
 
 /// What one row costs to produce, kept so the next frame does not produce it again.
 struct RowDrawCacheEntry {
-    /// The `BufferLine` this was built from.
+    /// The `BufferLine` this was built from — also what the table is keyed by.
     ///
-    /// ⚠ Compared with `===`, and that is not belt-and-braces. Scrolling rotates references inside the
-    /// `CircularList`, so the same absolute row number can point at a *different* line whose
-    /// `generation` happens to be equal — the counter is per line, not global. Identity is what makes
-    /// "same row number" mean "same line".
+    /// Kept as a strong reference for two reasons. It is the identity the key is derived from, and an
+    /// `ObjectIdentifier` is only unique among *live* objects: without a reference here a freed line's
+    /// address could be reused by a new one and hand back its glyphs. It is also re-checked with `===`
+    /// on every lookup, which costs nothing and makes that argument local.
     let lineRef: BufferLine
     let key: RowDrawKey
+    /// The absolute row this was shaped at, and whether reusing it anywhere else would be wrong.
+    ///
+    /// `buildAttributedString` takes `row` and almost never uses it: the one path that does is the
+    /// kitty unicode placeholder decoder, which encodes the row into the placement. So the row is not
+    /// part of the key — it is a *veto* recorded per entry, and only rows carrying placeholders pay it.
+    let builtAtRow: Int
+    let positionDependent: Bool
     let info: ViewLineInfo
     let prepared: [PreparedRowSegment]
 }
@@ -110,9 +127,9 @@ extension TerminalView {
     /// Bumping the epoch is the *whole* mechanism — deliberately not "bump and also empty the table".
     /// One rule decides whether an entry may be used (its key still matches), instead of that rule plus
     /// a second one that sometimes wipes the table; a second mechanism is one more thing that can be
-    /// half-applied. Nothing is leaked by leaving the stale entries in place: the table is keyed by
-    /// screen row and pruned to the screen every frame, so a stale entry is overwritten the next time
-    /// its row is drawn, and dropped if that row goes away.
+    /// half-applied. Nothing is leaked by leaving the stale entries in place: the table is pruned to
+    /// the lines on screen every frame, so a stale entry is overwritten the next time its line is
+    /// drawn, and dropped once that line scrolls away.
     func invalidateRowDrawCache() {
         rowDrawStyleEpoch &+= 1
     }
@@ -135,11 +152,6 @@ extension TerminalView {
         }
     }
 
-    /// The shaped state for `row`, from the cache when nothing that feeds it has changed.
-    ///
-    /// `row` is an absolute buffer index, which is also the cache key — `buildAttributedString` takes
-    /// `row` too (kitty placeholders encode it), so a cached entry is only ever valid for the row it
-    /// was built at.
     /// Everything one row's appearance depends on, as one comparable value. The single definition —
     /// the shaping cache, the on-screen record and the invalidation predicate all key on this, so there
     /// is no way for them to disagree about what "changed" means.
@@ -152,9 +164,17 @@ extension TerminalView {
                    styleEpoch: rowDrawStyleEpoch)
     }
 
+    /// The shaped state for `row`, from the cache when nothing that feeds it has changed.
+    ///
+    /// A hit does not require the line to still be at the row it was shaped at — that is the point of
+    /// keying by the line. The only thing that can encode the row into the shaped result is a kitty
+    /// placeholder, so such a row records ``RowDrawCacheEntry/positionDependent`` and refuses to be
+    /// reused anywhere else; every other row travels with its content.
     func rowDrawState(row: Int, line: BufferLine, cols: Int) -> (info: ViewLineInfo, prepared: [PreparedRowSegment]) {
         let key = rowDrawKey(row: row, line: line, cols: cols)
-        if let hit = rowDrawCache[row], hit.lineRef === line, hit.key == key {
+        let identity = ObjectIdentifier(line)
+        if let hit = rowDrawCache[identity], hit.lineRef === line, hit.key == key,
+           !hit.positionDependent || hit.builtAtRow == row {
             return (hit.info, hit.prepared)
         }
         let info = buildAttributedString(row: row, line: line, cols: cols)
@@ -164,7 +184,12 @@ extension TerminalView {
             guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
             return PreparedRowSegment(segment: segment, ctLine: ctLine, runs: runs)
         }
-        rowDrawCache[row] = RowDrawCacheEntry(lineRef: line, key: key, info: info, prepared: prepared)
+        rowDrawCache[identity] = RowDrawCacheEntry(lineRef: line,
+                                                  key: key,
+                                                  builtAtRow: row,
+                                                  positionDependent: !info.kittyPlaceholders.isEmpty,
+                                                  info: info,
+                                                  prepared: prepared)
         return (info, prepared)
     }
 
@@ -181,7 +206,12 @@ extension TerminalView {
             rowDrawCache.removeAll(keepingCapacity: true)
             return
         }
-        rowDrawCache = rowDrawCache.filter { visible.contains($0.key) }
+        let lines = terminal.displayBuffer.lines
+        var onScreen = Set<ObjectIdentifier>(minimumCapacity: visible.count)
+        for row in visible where row >= 0 && row < lines.count {
+            onScreen.insert(ObjectIdentifier(lines[row]))
+        }
+        rowDrawCache = rowDrawCache.filter { onScreen.contains($0.key) }
     }
 
     /// The rows inside a dirty band that would actually put different pixels on screen, as one range of
@@ -267,8 +297,10 @@ extension TerminalView {
     /// those clipped rows stale (`NarrowedInvalidationRenderTests` on the btop corpus). Two questions,
     /// two records; they share the key so they cannot disagree about what changed.
     func noteRowsOnScreen(rows: ClosedRange<Int>, bufferOffset: Int) {
+        let lines = terminal.displayBuffer.lines
         for absolute in rows {
-            guard let entry = rowDrawCache[absolute] else { continue }
+            guard absolute >= 0, absolute < lines.count else { continue }
+            guard let entry = rowDrawCache[ObjectIdentifier(lines[absolute])] else { continue }
             rowsOnScreen[absolute - bufferOffset] = RowOnScreen(lineRef: entry.lineRef, key: entry.key)
         }
     }

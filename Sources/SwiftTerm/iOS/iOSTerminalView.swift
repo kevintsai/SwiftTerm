@@ -267,7 +267,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     // Per-row shaped-draw cache for the CoreText path, keyed by absolute buffer row.
     // See AppleRowDrawCache.swift — `RowDrawKey` documents what has to match for a hit.
-    var rowDrawCache: [Int: RowDrawCacheEntry] = [:]
+    var rowDrawCache: [ObjectIdentifier: RowDrawCacheEntry] = [:]
     var rowDrawStyleEpoch: UInt64 = 0
     /// See the macOS declaration — kept in step so the shared draw code has one shape.
     var rowsOnScreen: [Int: RowOnScreen] = [:]

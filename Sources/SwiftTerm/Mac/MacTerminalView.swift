@@ -393,7 +393,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
     // Per-row shaped-draw cache for the CoreText path, keyed by absolute buffer row.
     // See AppleRowDrawCache.swift — `RowDrawKey` documents what has to match for a hit.
-    var rowDrawCache: [Int: RowDrawCacheEntry] = [:]
+    var rowDrawCache: [ObjectIdentifier: RowDrawCacheEntry] = [:]
     var rowDrawStyleEpoch: UInt64 = 0
 
     /// Ask AppKit only for the rows whose pixels would differ, instead of the whole dirty band

@@ -384,6 +384,11 @@ public final class BufferLine: CustomDebugStringConvertible {
         } else {
             images = [image]
         }
+        // `images` is line content that the draw path reads, so it owes the same signal every other
+        // mutation here gives. The row draw cache states that `generation` covers `line.images`; that
+        // was only true by luck, because a cell write usually accompanies a placement and because a
+        // scroll used to throw the whole table away. Neither is a guarantee.
+        bump()
     }
 
     public var debugDescription: String {
