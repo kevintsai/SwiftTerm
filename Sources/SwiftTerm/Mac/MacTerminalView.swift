@@ -439,7 +439,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// a conclusion. With the layer sampling our surface there is no present left to pay for; whether
     /// that is enough is a question only the running app answers, and flipping both flags back is a
     /// two-line change.
-    var usesOwnSurface = true
+    ///
+    /// **Back off (2026-09-09)**: B2 measured well (11–15% of one core against a 19.2% baseline, with the
+    /// present and AppKit's whole backing-layer path gone) but the user reported severe flicker across
+    /// many panes. Single-buffering is the suspect, and so is a real defect: the surface was locked only
+    /// at creation, never around the per-frame writes, so the compositor was never told the memory it
+    /// samples was being rewritten. Correctness of the pixels was pinned; correctness of the *timing*
+    /// was not tested and cannot be — nothing offline can see a torn frame.
+    var usesOwnSurface = false
 
     /// Move the pixels a scroll only displaced, instead of re-rendering them. Requires `usesOwnSurface`.
     /// `false` is the control arm, and the shape the renderer had before this landed.
@@ -480,7 +487,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// question can be settled: B1's offline benchmark said +68% and the app said -44%, because the
     /// benchmark's control arm painted into a plain bitmap while the real one paints into AppKit's
     /// store (spec 27 §4).
-    var presentsViaLayerContents = true
+    ///
+    /// Off with `usesOwnSurface` — see there for what the app reported and what has to be fixed first.
+    var presentsViaLayerContents = false
 
     /// The owned backing store and the geometry it was made for. See `ensureSurface()`.
     var surface: CGContext?
