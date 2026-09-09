@@ -175,8 +175,10 @@ extension TerminalView {
         let identity = ObjectIdentifier(line)
         if let hit = rowDrawCache[identity], hit.lineRef === line, hit.key == key,
            !hit.positionDependent || hit.builtAtRow == row {
+            rowDrawCacheHits &+= 1
             return (hit.info, hit.prepared)
         }
+        rowDrawCacheMisses &+= 1
         let info = buildAttributedString(row: row, line: line, cols: cols)
         let prepared: [PreparedRowSegment] = info.segments.compactMap { segment in
             guard segment.attributedString.length > 0 else { return nil }
@@ -314,4 +316,12 @@ extension TerminalView {
 
     /// How many rows are currently cached. Lets a test assert pruning without reaching into storage.
     var rowDrawCacheCountForTesting: Int { rowDrawCache.count }
+
+    /// Hits and misses since the last reset. See ``TerminalView/rowDrawCacheHits``.
+    var rowDrawCacheStatsForTesting: (hits: Int, misses: Int) { (rowDrawCacheHits, rowDrawCacheMisses) }
+
+    func resetRowDrawCacheStatsForTesting() {
+        rowDrawCacheHits = 0
+        rowDrawCacheMisses = 0
+    }
 }

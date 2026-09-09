@@ -269,6 +269,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // See AppleRowDrawCache.swift — `RowDrawKey` documents what has to match for a hit.
     var rowDrawCache: [ObjectIdentifier: RowDrawCacheEntry] = [:]
     var rowDrawStyleEpoch: UInt64 = 0
+
+    /// How often ``TerminalView/rowDrawState(row:line:cols:)`` reused a shaped row versus rebuilt it.
+    ///
+    /// A sampling profiler cannot answer this: a hit is cheap, and cheap work is close to invisible in
+    /// `sample`. "Most of the time inside `rowDrawState` is spent on misses" and "most rows miss" are
+    /// different claims, and only a counter separates them.
+    var rowDrawCacheHits = 0
+    var rowDrawCacheMisses = 0
     /// See the macOS declaration — kept in step so the shared draw code has one shape.
     var rowsOnScreen: [Int: RowOnScreen] = [:]
 
