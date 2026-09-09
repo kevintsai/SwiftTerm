@@ -159,10 +159,13 @@ extension TerminalView {
         // Screen row 0 is the top of the image, which is the first row in the bitmap's memory. Content
         // moving UP the screen (`shift > 0`: the line that was at row `shift` is now at row 0) therefore
         // moves toward lower addresses.
-        if shift > 0 {
-            memmove(data, data.advanced(by: offsetBytes), moveBytes)
-        } else {
-            memmove(data.advanced(by: offsetBytes), data, moveBytes)
+        // The blit writes to the same memory the compositor samples, so it belongs inside the lock too.
+        withSurfaceLocked {
+            if shift > 0 {
+                memmove(data, data.advanced(by: offsetBytes), moveBytes)
+            } else {
+                memmove(data.advanced(by: offsetBytes), data, moveBytes)
+            }
         }
 
         // The records move with the pixels, so the rows that scrolled now compare equal and drop out of
@@ -259,11 +262,40 @@ extension TerminalView {
         pendingSurfacePaint.removeAll(keepingCapacity: true)
         surfaceMovedPixelsThisCycle = false
         guard !toPaint.isEmpty else { return }
-        for r in toPaint {
-            paintIntoSurface(r.intersection(bounds), ctx, bufferOffset: bufferOffset)
+        withSurfaceLocked {
+            for r in toPaint {
+                paintIntoSurface(r.intersection(bounds), ctx, bufferOffset: bufferOffset)
+            }
         }
-        // Re-assigning is how CA is told this surface holds a new frame; it does not copy it.
-        layer?.contents = surfaceIOSurface
+        noteSurfaceContentsChanged()
+    }
+
+    /// Hold the surface's lock across CPU writes.
+    ///
+    /// Not decoration: `IOSurface` tracks a seed that moves on unlock, and that seed is how anything
+    /// else — the compositor included — can tell the memory it is sampling has been rewritten. The first
+    /// cut locked only at creation and then wrote every frame outside the lock, so the seed never moved
+    /// after the first frame.
+    func withSurfaceLocked(_ body: () -> Void) {
+        guard let io = surfaceIOSurface else { return body() }
+        io.lock(options: [], seed: nil)
+        body()
+        io.unlock(options: [], seed: nil)
+    }
+
+    /// Tell Core Animation the contents object it already holds now contains a different picture.
+    ///
+    /// ⚠ **There is no public way to say that**, and that is the open half of the flicker. Re-assigning
+    /// `layer.contents` is the same object every frame, so the assignment carries no information; the
+    /// API that means "these contents were mutated in place" (`-[CALayer setContentsChanged]`) is not in
+    /// the public headers, and this fork does not call private API. The documented way to hand Core
+    /// Animation a new frame is to hand it a **different surface** — a swap chain — which is why the
+    /// remaining work is double buffering and not another one-line signal.
+    ///
+    /// Until then this only re-establishes contents if something dropped them.
+    func noteSurfaceContentsChanged() {
+        guard let layer, let io = surfaceIOSurface else { return }
+        if layer.contents == nil { layer.contents = io }
     }
 }
 
