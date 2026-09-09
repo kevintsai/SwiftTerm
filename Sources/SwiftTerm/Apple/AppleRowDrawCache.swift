@@ -101,7 +101,13 @@ struct RowOnScreen {
 }
 
 /// What one row costs to produce, kept so the next frame does not produce it again.
-struct RowDrawCacheEntry {
+///
+/// A **class**, and that is a performance decision, not a modelling one. As a struct this is a large
+/// value — two arrays, a key, a `ViewLineInfo` with five more arrays — and every dictionary lookup
+/// copied the whole thing out, retaining each field on the way. The compiler names that copy
+/// `outlined assign with take of RowDrawCacheEntry`, and a profile of the running app put it at 3.2%
+/// of everything the app was doing, paid on hits as much as on misses. One retain replaces it.
+final class RowDrawCacheEntry {
     /// The `BufferLine` this was built from — also what the table is keyed by.
     ///
     /// Kept as a strong reference for two reasons. It is the identity the key is derived from, and an
@@ -119,6 +125,20 @@ struct RowDrawCacheEntry {
     let positionDependent: Bool
     let info: ViewLineInfo
     let prepared: [PreparedRowSegment]
+
+    init(lineRef: BufferLine,
+         key: RowDrawKey,
+         builtAtRow: Int,
+         positionDependent: Bool,
+         info: ViewLineInfo,
+         prepared: [PreparedRowSegment]) {
+        self.lineRef = lineRef
+        self.key = key
+        self.builtAtRow = builtAtRow
+        self.positionDependent = positionDependent
+        self.info = info
+        self.prepared = prepared
+    }
 }
 
 extension TerminalView {
