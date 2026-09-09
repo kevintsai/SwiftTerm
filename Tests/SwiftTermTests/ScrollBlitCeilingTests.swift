@@ -78,7 +78,7 @@ final class ScrollBlitCeilingTests: XCTestCase {
     }
 
     /// `oracle == false` → paint what the view asks for. `true` → paint only rows whose content is new.
-    private func replay(oracle: Bool) throws -> Arm {
+    private func replay(oracle: Bool, coalesce: Int = 1) throws -> Arm {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 384))
         let terminal: Terminal = view.terminal
         terminal.resize(cols: 80, rows: 24)
@@ -89,8 +89,12 @@ final class ScrollBlitCeilingTests: XCTestCase {
         var painted: [ObjectIdentifier: UInt64] = [:]
         let rowHeight = view.bounds.height / CGFloat(terminal.rows)
 
+        var pending = 0
         for frame in try frames() {
             terminal.feed(buffer: frame[...])
+            pending += 1
+            guard pending >= coalesce else { continue }
+            pending = 0
             guard let (start, end) = terminal.getUpdateRange() else { continue }
             terminal.clearUpdateRange()
             guard let runs = view.visuallyChangedRowRuns(rowStart: start, rowEnd: end) else { continue }
@@ -131,14 +135,16 @@ final class ScrollBlitCeilingTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["SWIFTTERM_BLIT_CEILING"] == "1",
                           "measurement only; set SWIFTTERM_BLIT_CEILING=1 to run")
         let runs = Int(ProcessInfo.processInfo.environment["SWIFTTERM_BLIT_RUNS"] ?? "") ?? 3
+        for coalesce in [1, 3, 5] {
         var today: [Double] = [], oracle: [Double] = []
         var t = Arm(), o = Arm()
         for _ in 0..<runs {
-            t = try replay(oracle: false); today.append(t.seconds * 1000)
-            o = try replay(oracle: true);  oracle.append(o.seconds * 1000)
+            t = try replay(oracle: false, coalesce: coalesce); today.append(t.seconds * 1000)
+            o = try replay(oracle: true, coalesce: coalesce);  oracle.append(o.seconds * 1000)
         }
         today.sort(); oracle.sort()
         let tm = today[today.count / 2], om = oracle[oracle.count / 2]
+        print("  ── \(coalesce) tmux update(s) per draw ──")
         print(String(format: """
 
         ── what scroll blitting could save on the paint side (80x24, real tmux capture) ──
@@ -151,6 +157,7 @@ final class ScrollBlitCeilingTests: XCTestCase {
         """, tm, t.rowsPainted, t.draws, Double(t.rowsPainted) / Double(max(t.draws, 1)),
              om, o.rowsPainted, o.draws, Double(o.rowsPainted) / Double(max(o.draws, 1)),
              (tm - om) / tm * 100, Double(t.rowsPainted) / Double(max(o.rowsPainted, 1))))
+        }
     }
 }
 #endif
