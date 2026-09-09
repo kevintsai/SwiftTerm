@@ -59,6 +59,7 @@ final class StreamingScrollHitRateTests: XCTestCase {
         var hits = 0
         var misses = 0
         var rebuiltIdentical = 0
+        var seconds: Double = 0
         var hitRate: Double { rowsShaped == 0 ? 0 : Double(hits) / Double(rowsShaped) * 100 }
     }
 
@@ -99,7 +100,9 @@ final class StreamingScrollHitRateTests: XCTestCase {
                     guard absolute >= 0, absolute < buffer.lines.count else { continue }
                     let line = buffer.lines[absolute]
                     let before = view.rowDrawCacheStatsForTesting
+                    let started = ProcessInfo.processInfo.systemUptime
                     let state = view.rowDrawState(row: absolute, line: line, cols: terminal.cols)
+                    result.seconds += ProcessInfo.processInfo.systemUptime - started
                     let after = view.rowDrawCacheStatsForTesting
                     result.rowsShaped += 1
                     let text = state.info.segments.map { $0.attributedString.string }.joined()
@@ -120,6 +123,31 @@ final class StreamingScrollHitRateTests: XCTestCase {
         result.hits = stats.hits
         result.misses = stats.misses
         return result
+    }
+
+    /// Time inside `rowDrawState` over the same corpus — the seam the "what does one lookup cost"
+    /// levers are measured on. Env-gated: it is a measurement, not an assertion, and it is noisy
+    /// enough that a threshold would only flake.
+    func testShapingTimeWhileStreaming() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["SWIFTTERM_SCROLL_BENCH"] == "1",
+                          "measurement only; set SWIFTTERM_SCROLL_BENCH=1 to run")
+        let runs = Int(ProcessInfo.processInfo.environment["SWIFTTERM_SCROLL_RUNS"] ?? "") ?? 5
+        for coalesce in [1, 5] {
+            var samples: [Double] = []
+            var last = Result()
+            for _ in 0..<runs {
+                let r = try replay(coalesce: coalesce)
+                samples.append(r.seconds * 1000)
+                last = r
+            }
+            samples.sort()
+            let median = samples[samples.count / 2]
+            print(String(format:
+                "rowDrawState  coalesce=%d  median %8.2f ms over %d rows (%.4f ms/row, hit %.1f%%)  runs=%@",
+                coalesce, median, last.rowsShaped,
+                median / Double(max(last.rowsShaped, 1)), last.hitRate,
+                samples.map { String(format: "%.1f", $0) }.joined(separator: " ")))
+        }
     }
 
     func testHitRateWhileStreaming() throws {
