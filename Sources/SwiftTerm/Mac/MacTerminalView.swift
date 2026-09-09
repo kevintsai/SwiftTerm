@@ -495,6 +495,19 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     var surface: CGContext?
     /// Backing memory for `surface` when the layer is sampling it directly. See `presentsViaLayerContents`.
     var surfaceIOSurface: IOSurface?
+
+    /// The swap chain: Core Animation is handed a **different** surface each frame.
+    ///
+    /// Re-handing it the same object says nothing — there is no public way to announce "the contents you
+    /// hold were mutated in place" — so a new frame has to be a new surface. Three of them, not two:
+    /// with two, the buffer we are about to write into is the one displayed one frame ago, and writing
+    /// into a surface the compositor may still be sampling is the flicker we are trying to remove.
+    ///
+    /// Each buffer carries the operations it has not caught up on, so bringing one current replays a
+    /// memmove and a couple of rows rather than copying the whole front buffer — the copy that made
+    /// double buffering look unaffordable back when every frame repainted everything.
+    var surfaceChain: [TerminalSurfaceBuffer] = []
+    var surfaceChainIndex = 0
     /// Set by anything that invalidates content without going through `updateDisplay` (font, geometry).
     var surfaceNeedsFullRepaint = true
     var surfaceSize: CGSize = .zero

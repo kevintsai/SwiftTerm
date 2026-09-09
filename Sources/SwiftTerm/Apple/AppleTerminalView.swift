@@ -1879,6 +1879,8 @@ extension TerminalView {
         var blitted = 0
         #if os(macOS)
         if coreTextPath {
+            // Choose and catch up the surface for this frame BEFORE the scroll is applied to it.
+            prepareSurfaceForFrame(bufferOffset: terminal.displayBuffer.yDisp)
             blitted = blitScrolledPixels()
         }
         #endif

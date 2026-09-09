@@ -18,6 +18,7 @@
 import AppKit
 import Foundation
 import Testing
+import XCTest
 
 @testable import SwiftTerm
 
@@ -330,6 +331,47 @@ final class NarrowedInvalidationRenderTests {
         let made = makeStore(view)!
         scratchStores[ObjectIdentifier(view)] = made
         return made
+    }
+
+    /// Every buffer in the swap chain must hold the same picture once caught up.
+    ///
+    /// Core Animation is handed a different buffer each frame, so a buffer that is behind is a frame the
+    /// user sees wrong — which is what flicker IS. Reading only the buffer painted last (as the test
+    /// below does) cannot see that.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SWIFTTERM_SWAP_CHAIN"] == "1",
+                   "swap chain 未完成——設 SWIFTTERM_SWAP_CHAIN=1 看它現在錯在哪"),
+          arguments: [("streaming-scroll-through-tmux.raw", 80, 24)])
+    func everySurfaceInTheChainAgreesOnceCaughtUp(corpus: (fixture: String, cols: Int, rows: Int)) throws {
+        // ⚠ **This currently FAILS, on purpose left in reach.** The swap chain is unfinished: buffers 1
+        // and 2 disagree with buffer 0 after catch-up by tens of thousands of pixels, which is precisely
+        // the flicker it was written to prevent. It is gated rather than deleted because it is the only
+        // thing that can tell anyone whether the chain is right, and because a green suite must not
+        // imply a working chain. `presentsViaLayerContents` is off, so nothing ships on this.
+        //
+        // Two candidates not yet ruled out, in order of suspicion:
+        //  1. `catchUpSurface` paints through `drawTerminalContents`, which also writes the GLOBAL
+        //     `rowsOnScreen` record and prunes the row cache — so catching up an idle buffer mutates the
+        //     bookkeeping the next frame's narrowing depends on.
+        //  2. The presented buffer paints `invalidationRect(run)`, which pads a run by another cell;
+        //     the idle buffers only record the unpadded rows, so they under-paint at run edges.
+        let (fixture, cols, rows) = corpus
+        let view = makeView(cols: cols, rows: rows)
+        view.narrowsInvalidationToChangedRows = true
+        view.usesOwnSurface = true
+        view.blitsScrolledPixels = true
+        view.presentsViaLayerContents = true
+        for frame in try frames(fixture) {
+            view.terminal.feed(byteArray: frame)
+            view.updateDisplay(notifyAccessibility: false)
+        }
+        let all = view.allSurfacePixelsForTesting(bufferOffset: view.terminal.displayBuffer.yDisp)
+        #expect(all.count >= 2, "swap chain 沒有建起來（只有 \(all.count) 張），這條測試等於沒測")
+        let surfaces = all.map { Surface(pixels: $0.bytes, bytesPerRow: $0.bytesPerRow, height: $0.height) }
+        for (i, other) in surfaces.enumerated().dropFirst() {
+            let diff = worstDifference(surfaces[0], other)
+            #expect(diff.beyondHair == 0,
+                    "chain 第 \(i) 張補完後與第 0 張不同（\(fixture)）：最大差 \(diff.maxDelta)，\(differingRows(other, surfaces[0]))")
+        }
     }
 
     /// Handing the layer our surface must paint the same pixels as presenting it by hand.
