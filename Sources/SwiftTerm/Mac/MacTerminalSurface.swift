@@ -205,13 +205,11 @@ extension TerminalView {
         }
 
         // The records move with the pixels, so the rows that scrolled now compare equal and drop out of
-        // the invalidation. A row whose shaped output encodes its position (a kitty placeholder) is the
-        // one thing that cannot be reused at a different row, so its record is dropped instead of moved.
+        // the invalidation.
         var moved: [Int: RowOnScreen] = [:]
         for (prevY, record) in rowsOnScreen {
             let newY = prevY - shift
             guard newY >= 0, newY < rows else { continue }
-            if rowDrawCache[ObjectIdentifier(record.lineRef)]?.positionDependent == true { continue }
             moved[newY] = record
         }
         rowsOnScreen = moved

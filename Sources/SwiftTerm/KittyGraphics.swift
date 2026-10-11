@@ -123,6 +123,10 @@ struct KittyGraphicsImage {
     let payload: KittyGraphicsPayload
     let byteSize: Int
     var lastAccessTick: UInt64
+    /// Bumped every time an image is stored, never reused: a renderer that keeps something derived
+    /// from the payload (a decoded / resampled bitmap) keys it by `(imageId, revision)`, so a new
+    /// transmit under the same id can never be drawn with the old pixels.
+    let revision: UInt64
 }
 
 struct KittyGraphicsPending {
@@ -139,6 +143,7 @@ final class KittyGraphicsState {
     var placementsByKey: [KittyPlacementKey: KittyPlacementRecord] = [:]
     var totalImageBytes: Int = 0
     var nextImageAccessTick: UInt64 = 1
+    var nextImageRevision: UInt64 = 1
 }
 
 extension Terminal {
@@ -1741,9 +1746,12 @@ extension Terminal {
         if let existing = kittyGraphicsState.imagesById[imageId] {
             kittyGraphicsState.totalImageBytes = max(0, kittyGraphicsState.totalImageBytes - existing.byteSize)
         }
+        let revision = kittyGraphicsState.nextImageRevision
+        kittyGraphicsState.nextImageRevision &+= 1
         kittyGraphicsState.imagesById[imageId] = KittyGraphicsImage(payload: payload,
                                                                    byteSize: byteSize,
-                                                                   lastAccessTick: lastAccessTick)
+                                                                   lastAccessTick: lastAccessTick,
+                                                                   revision: revision)
         kittyGraphicsState.totalImageBytes += byteSize
         if let number = imageNumber {
             kittyGraphicsState.imageNumbers[number] = imageId

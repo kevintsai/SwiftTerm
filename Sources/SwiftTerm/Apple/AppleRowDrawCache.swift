@@ -116,26 +116,15 @@ final class RowDrawCacheEntry {
     /// on every lookup, which costs nothing and makes that argument local.
     let lineRef: BufferLine
     let key: RowDrawKey
-    /// The absolute row this was shaped at, and whether reusing it anywhere else would be wrong.
-    ///
-    /// `buildAttributedString` takes `row` and almost never uses it: the one path that does is the
-    /// kitty unicode placeholder decoder, which encodes the row into the placement. So the row is not
-    /// part of the key — it is a *veto* recorded per entry, and only rows carrying placeholders pay it.
-    let builtAtRow: Int
-    let positionDependent: Bool
     let info: ViewLineInfo
     let prepared: [PreparedRowSegment]
 
     init(lineRef: BufferLine,
          key: RowDrawKey,
-         builtAtRow: Int,
-         positionDependent: Bool,
          info: ViewLineInfo,
          prepared: [PreparedRowSegment]) {
         self.lineRef = lineRef
         self.key = key
-        self.builtAtRow = builtAtRow
-        self.positionDependent = positionDependent
         self.info = info
         self.prepared = prepared
     }
@@ -187,14 +176,14 @@ extension TerminalView {
     /// The shaped state for `row`, from the cache when nothing that feeds it has changed.
     ///
     /// A hit does not require the line to still be at the row it was shaped at — that is the point of
-    /// keying by the line. The only thing that can encode the row into the shaped result is a kitty
-    /// placeholder, so such a row records ``RowDrawCacheEntry/positionDependent`` and refuses to be
-    /// reused anywhere else; every other row travels with its content.
+    /// keying by the line. Nothing in the shaped result depends on the screen row: the inputs that do
+    /// (selection, link highlight) are in the key, and decoded kitty placeholders carry no row
+    /// (``KittyPlaceholderCell``). So a row travels with its content, image rows included — which is
+    /// what keeps scrolling past a kitty image from reshaping every image row every frame.
     func rowDrawState(row: Int, line: BufferLine, cols: Int) -> (info: ViewLineInfo, prepared: [PreparedRowSegment]) {
         let key = rowDrawKey(row: row, line: line, cols: cols)
         let identity = ObjectIdentifier(line)
-        if let hit = rowDrawCache[identity], hit.lineRef === line, hit.key == key,
-           !hit.positionDependent || hit.builtAtRow == row {
+        if let hit = rowDrawCache[identity], hit.lineRef === line, hit.key == key {
             rowDrawCacheHits &+= 1
             return (hit.info, hit.prepared)
         }
@@ -208,8 +197,6 @@ extension TerminalView {
         }
         rowDrawCache[identity] = RowDrawCacheEntry(lineRef: line,
                                                   key: key,
-                                                  builtAtRow: row,
-                                                  positionDependent: !info.kittyPlaceholders.isEmpty,
                                                   info: info,
                                                   prepared: prepared)
         return (info, prepared)

@@ -8,7 +8,7 @@ import CoreGraphics
 
 final class KittyUnicodeTests {
 
-    private func decodePlaceholders(line: BufferLine, row: Int, cols: Int, terminal: Terminal) -> [KittyPlaceholderCell] {
+    private func decodePlaceholders(line: BufferLine, cols: Int, terminal: Terminal) -> [KittyPlaceholderCell] {
         var placeholders: [KittyPlaceholderCell] = []
         var previous: KittyPlaceholderCell?
         var previousAttribute: Attribute?
@@ -19,7 +19,6 @@ final class KittyUnicodeTests {
             let character = ch.code == 0 ? " " : terminal.getCharacter(for: ch)
             if let placeholder = KittyPlaceholderDecoder.decode(character: character,
                                                                 attribute: ch.attribute,
-                                                                row: row,
                                                                 col: col,
                                                                 previous: previous,
                                                                 previousAttribute: previousAttribute) {
@@ -35,65 +34,16 @@ final class KittyUnicodeTests {
         return placeholders
     }
 
-    private struct PlaceholderRun {
-        let imageId: UInt32
-        let placementId: UInt32
-        let placeholderRow: Int
-        let placeholderCol: Int
-        let col: Int
-        let width: Int
-    }
-
     private func placeholders(in terminal: Terminal, row: Int = 0) -> [KittyPlaceholderCell] {
         guard let line = terminal.getLine(row: row) else {
             return []
         }
-        return decodePlaceholders(line: line, row: row, cols: terminal.cols, terminal: terminal)
+        return decodePlaceholders(line: line, cols: terminal.cols, terminal: terminal)
     }
 
-    private func placeholderRuns(in terminal: Terminal, row: Int = 0) -> [PlaceholderRun] {
-        let cells = placeholders(in: terminal, row: row).sorted { $0.col < $1.col }
-        guard !cells.isEmpty else {
-            return []
-        }
-        var runs: [PlaceholderRun] = []
-        var current: PlaceholderRun?
-        var lastCol = 0
-        var lastPlaceholderCol = 0
-
-        for cell in cells {
-            if let cur = current,
-               cell.imageId == cur.imageId,
-               cell.placementId == cur.placementId,
-               cell.placeholderRow == cur.placeholderRow,
-               cell.col == lastCol + 1,
-               cell.placeholderCol == lastPlaceholderCol + 1 {
-                current = PlaceholderRun(imageId: cur.imageId,
-                                         placementId: cur.placementId,
-                                         placeholderRow: cur.placeholderRow,
-                                         placeholderCol: cur.placeholderCol,
-                                         col: cur.col,
-                                         width: cur.width + 1)
-                lastCol = cell.col
-                lastPlaceholderCol = cell.placeholderCol
-            } else {
-                if let cur = current {
-                    runs.append(cur)
-                }
-                current = PlaceholderRun(imageId: cell.imageId,
-                                         placementId: cell.placementId,
-                                         placeholderRow: cell.placeholderRow,
-                                         placeholderCol: cell.placeholderCol,
-                                         col: cell.col,
-                                         width: 1)
-                lastCol = cell.col
-                lastPlaceholderCol = cell.placeholderCol
-            }
-        }
-        if let cur = current {
-            runs.append(cur)
-        }
-        return runs
+    /// The production grouping (`KittyPlaceholderRun.group`), so these tests pin what the renderer draws
+    private func placeholderRuns(in terminal: Terminal, row: Int = 0) -> [KittyPlaceholderRun] {
+        KittyPlaceholderRun.group(placeholders(in: terminal, row: row))
     }
 
     @Test func testUnicodeDiacriticsSorted() {

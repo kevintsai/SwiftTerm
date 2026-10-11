@@ -8,8 +8,12 @@ import Foundation
 import CoreGraphics
 #endif
 
+/// One decoded placeholder cell of a row.
+///
+/// Deliberately carries no screen row: everything here is a function of the row's own content, so a
+/// row's decoded placeholders can be reused wherever that line is on screen (the row draw cache keys by
+/// line, not by position). The drawing code takes the row's position from where it is drawing it.
 struct KittyPlaceholderCell {
-    let row: Int
     let col: Int
     let imageId: UInt32
     let placementId: UInt32
@@ -21,7 +25,6 @@ struct KittyPlaceholderCell {
 enum KittyPlaceholderDecoder {
     static func decode(character: Character,
                        attribute: Attribute,
-                       row: Int,
                        col: Int,
                        previous: KittyPlaceholderCell?,
                        previousAttribute: Attribute?) -> KittyPlaceholderCell? {
@@ -44,7 +47,8 @@ enum KittyPlaceholderDecoder {
 
         let sameFg = previousAttribute?.fg == attribute.fg
         let sameUnderline = previousAttribute?.underlineColor == attribute.underlineColor
-        let isAdjacent = previous?.row == row && previous?.col == col - 1
+        // `previous` is always from the same row: the caller decodes one row at a time
+        let isAdjacent = previous?.col == col - 1
 
         var placeholderRow: Int?
         var placeholderCol: Int?
@@ -90,8 +94,7 @@ enum KittyPlaceholderDecoder {
         let imageId = imageBaseId | (UInt32(min(msb, 255)) << 24)
         let placementId = colorToId(attribute.underlineColor) ?? 0
 
-        return KittyPlaceholderCell(row: row,
-                                    col: col,
+        return KittyPlaceholderCell(col: col,
                                     imageId: imageId,
                                     placementId: placementId,
                                     placeholderRow: placeholderRow,
@@ -116,6 +119,56 @@ enum KittyPlaceholderDecoder {
         case .defaultColor, .defaultInvertedColor:
             return 0
         }
+    }
+}
+
+/// Consecutive placeholder cells of one row that show consecutive columns of the same image row:
+/// they can be drawn as one rectangle instead of one draw per cell.
+struct KittyPlaceholderRun: Equatable {
+    let imageId: UInt32
+    let placementId: UInt32
+    let placeholderRow: Int
+    /// Image column shown by the first cell
+    let placeholderCol: Int
+    /// Screen column of the first cell
+    let col: Int
+    /// Number of cells
+    let width: Int
+
+    /// Groups a row's placeholder cells (in column order) into runs. A run breaks wherever the next
+    /// cell is not the next screen column, or does not show the next column of the same image row.
+    static func group(_ cells: [KittyPlaceholderCell]) -> [KittyPlaceholderRun] {
+        var runs: [KittyPlaceholderRun] = []
+        var current: KittyPlaceholderRun?
+        for cell in cells {
+            if let cur = current,
+               cell.imageId == cur.imageId,
+               cell.placementId == cur.placementId,
+               cell.placeholderRow == cur.placeholderRow,
+               cell.col == cur.col + cur.width,
+               cell.placeholderCol == cur.placeholderCol + cur.width {
+                current = KittyPlaceholderRun(imageId: cur.imageId,
+                                              placementId: cur.placementId,
+                                              placeholderRow: cur.placeholderRow,
+                                              placeholderCol: cur.placeholderCol,
+                                              col: cur.col,
+                                              width: cur.width + 1)
+            } else {
+                if let cur = current {
+                    runs.append(cur)
+                }
+                current = KittyPlaceholderRun(imageId: cell.imageId,
+                                              placementId: cell.placementId,
+                                              placeholderRow: cell.placeholderRow,
+                                              placeholderCol: cell.placeholderCol,
+                                              col: cell.col,
+                                              width: 1)
+            }
+        }
+        if let cur = current {
+            runs.append(cur)
+        }
+        return runs
     }
 }
 

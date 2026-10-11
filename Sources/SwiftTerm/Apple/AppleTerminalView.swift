@@ -606,47 +606,22 @@ extension TerminalView {
         return nsattr
     }
 
-    private func kittyImageFromRgba(bytes: [UInt8], width: Int, height: Int) -> TTImage? {
-        let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-        let data = Data(bytes)
-        guard let providerRef = CGDataProvider(data: data as CFData) else {
-            return nil
-        }
-        guard let cgimage = CGImage(width: width,
-                                    height: height,
-                                    bitsPerComponent: 8,
-                                    bitsPerPixel: 32,
-                                    bytesPerRow: width * 4,
-                                    space: rgbColorSpace,
-                                    bitmapInfo: bitmapInfo,
-                                    provider: providerRef,
-                                    decode: nil,
-                                    shouldInterpolate: true,
-                                    intent: .defaultIntent) else {
-            return nil
-        }
-        return TTImage(cgImage: cgimage, size: CGSize(width: width, height: height))
-    }
-
-    private func kittyPlaceholderImage(imageId: UInt32, cache: inout [UInt32: TTImage]) -> TTImage? {
-        if let cached = cache[imageId] {
-            return cached
-        }
-        guard let kittyImage = terminal.kittyGraphicsState.imagesById[imageId] else {
-            return nil
-        }
-        let image: TTImage?
-        switch kittyImage.payload {
+    /// The pixel size of a stored kitty image without decoding it (PNG: the IHDR header)
+    private func kittyImagePixelSize(_ payload: KittyGraphicsPayload) -> CGSize? {
+        switch payload {
+        case .rgba(_, let width, let height):
+            return CGSize(width: width, height: height)
         case .png(let data):
-            image = TTImage(data: data)
-        case .rgba(let bytes, let width, let height):
-            image = kittyImageFromRgba(bytes: bytes, width: width, height: height)
+            // PNG signature (8) + IHDR length (4) + "IHDR" (4) + width (4) + height (4)
+            guard data.count >= 24 else { return nil }
+            let base = data.startIndex
+            func be32(_ at: Int) -> Int {
+                (Int(data[base + at]) << 24) | (Int(data[base + at + 1]) << 16)
+                    | (Int(data[base + at + 2]) << 8) | Int(data[base + at + 3])
+            }
+            let width = be32(16), height = be32(20)
+            return width > 0 && height > 0 ? CGSize(width: width, height: height) : nil
         }
-        if let image {
-            cache[imageId] = image
-        }
-        return image
     }
 
     private func kittyAspectFitRect(imageSize: CGSize, in rect: CGRect) -> CGRect {
@@ -817,7 +792,6 @@ extension TerminalView {
                 previousPlaceholderAttribute = nil
             } else if let placeholder = KittyPlaceholderDecoder.decode(character: character,
                                                                        attribute: attr,
-                                                                       row: row,
                                                                        col: col,
                                                                        previous: previousPlaceholder,
                                                                        previousAttribute: previousPlaceholderAttribute) {
@@ -1350,7 +1324,7 @@ extension TerminalView {
                 virtualPlacementsByImageId[record.imageId, default: []].append(record)
             }
         }
-        var placeholderImageCache: [UInt32: TTImage] = [:]
+        kittyPlaceholderImages.prune(keeping: terminal.kittyGraphicsState)
 
         #if os(macOS)
         // Clear the invalidated region before painting. We fill only cells that carry
@@ -1648,30 +1622,37 @@ extension TerminalView {
             }
 
             if !lineInfo.kittyPlaceholders.isEmpty {
-                for placeholder in lineInfo.kittyPlaceholders {
-                    guard let records = virtualPlacementsByImageId[placeholder.imageId] else {
+                // One draw per run of consecutive cells showing consecutive columns of one image row,
+                // with an image already resampled to the size it is shown at (see
+                // AppleKittyPlaceholderImages.swift for why per-cell draws of the source image were the
+                // cost of scrolling past an image).
+                let deviceScale = max(1, abs(context.ctm.a))
+                let imageColorSpace = context.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+                for run in KittyPlaceholderRun.group(lineInfo.kittyPlaceholders) {
+                    guard let records = virtualPlacementsByImageId[run.imageId] else {
                         continue
                     }
                     guard let record = records.first(where: { record in
-                        if placeholder.placementId != 0 && record.placementId != placeholder.placementId {
+                        if run.placementId != 0 && record.placementId != run.placementId {
                             return false
                         }
-                        return record.cols > placeholder.placeholderCol &&
-                            record.rows > placeholder.placeholderRow &&
+                        return record.cols > run.placeholderCol &&
+                            record.rows > run.placeholderRow &&
                             record.cols > 0 &&
                             record.rows > 0
                     }) else {
                         continue
                     }
-                    guard let image = kittyPlaceholderImage(imageId: placeholder.imageId, cache: &placeholderImageCache) else {
+                    guard let stored = terminal.kittyGraphicsState.imagesById[run.imageId],
+                          let natural = kittyImagePixelSize(stored.payload) else {
                         continue
                     }
 
                     let offsetScale = getImageScale()
                     let offsetX = CGFloat(record.pixelOffsetX) / offsetScale
                     let offsetY = CGFloat(record.pixelOffsetY) / offsetScale
-                    let placementOriginX = lineOrigin.x + CGFloat(placeholder.col - placeholder.placeholderCol) * cellDimension.width + offsetX
-                    let placementTopY = lineOrigin.y + CGFloat(placeholder.placeholderRow) * cellDimension.height
+                    let placementOriginX = lineOrigin.x + CGFloat(run.col - run.placeholderCol) * cellDimension.width + offsetX
+                    let placementTopY = lineOrigin.y + CGFloat(run.placeholderRow) * cellDimension.height
                     let placementOriginY = placementTopY - CGFloat(record.rows - 1) * cellDimension.height + offsetY
                     let placementRect = CGRect(x: placementOriginX,
                                                y: placementOriginY,
@@ -1680,13 +1661,29 @@ extension TerminalView {
                     if placementRect.width <= 0 || placementRect.height <= 0 {
                         continue
                     }
-                    let imageRect = kittyAspectFitRect(imageSize: image.size, in: placementRect)
-                    let cellRect = CGRect(x: lineOrigin.x + CGFloat(placeholder.col) * cellDimension.width,
-                                          y: lineOrigin.y,
-                                          width: cellDimension.width,
-                                          height: cellDimension.height)
+                    // Snapped to device pixels, with the image resampled to exactly that many pixels:
+                    // then each frame's draw is a copy, not a resample
+                    let fitted = kittyAspectFitRect(imageSize: natural, in: placementRect)
+                    let pixelWidth = Int((fitted.width * deviceScale).rounded())
+                    let pixelHeight = Int((fitted.height * deviceScale).rounded())
+                    let imageRect = CGRect(x: (fitted.minX * deviceScale).rounded() / deviceScale,
+                                           y: (fitted.minY * deviceScale).rounded() / deviceScale,
+                                           width: CGFloat(pixelWidth) / deviceScale,
+                                           height: CGFloat(pixelHeight) / deviceScale)
+                    guard let image = kittyPlaceholderImages.image(imageId: run.imageId,
+                                                                   stored: stored,
+                                                                   pixelWidth: pixelWidth,
+                                                                   pixelHeight: pixelHeight,
+                                                                   size: imageRect.size,
+                                                                   colorSpace: imageColorSpace) else {
+                        continue
+                    }
+                    let runRect = CGRect(x: lineOrigin.x + CGFloat(run.col) * cellDimension.width,
+                                         y: lineOrigin.y,
+                                         width: CGFloat(run.width) * cellDimension.width,
+                                         height: cellDimension.height)
                     context.saveGState()
-                    context.clip(to: cellRect)
+                    context.clip(to: runRect)
                     image.draw(in: imageRect)
                     context.restoreGState()
                 }
