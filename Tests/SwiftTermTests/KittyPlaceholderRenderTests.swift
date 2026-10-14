@@ -147,6 +147,30 @@ final class KittyPlaceholderRenderTests {
         #expect(sawGreen, "the re-transmitted image is drawn")
     }
 
+    /// The image is resampled to the device pixels it is shown at when the view draws the way it does
+    /// in an app: inside a window, through its backing layer, at 2x. There AppKit keeps the device scale
+    /// in the context's base transform — `context.ctm` reads 1 while a point is 2 device pixels — so a
+    /// scale taken from the CTM resamples to half resolution and the screen blows it back up: the image
+    /// is blurry. `cacheDisplay` (the other tests) exposes the scale in the CTM and cannot see this.
+    @Test func anImageIsResampledToDevicePixelsWhenDrawnThroughAWindowLayer() throws {
+        let view = makeView()
+        let window = NSWindow(contentRect: view.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        let scale = window.backingScaleFactor
+        try #require(scale >= 2, "needs a 2x screen to mean anything (backingScaleFactor = \(scale))")
+        showImage(view, left: red, right: blue)
+        let cell = view.cellDimension!
+
+        // The draw AppKit performs for a window-hosted, layer-backed view
+        let layer = try #require(view.layer)
+        layer.setNeedsDisplay()
+        layer.displayIfNeeded()
+
+        let size = try #require(view.kittyPlaceholderImages.scaledPixelSize(imageId: imageId), "the image was drawn")
+        #expect(size.width == Int((cell.width * 8 * scale).rounded()), "width \(size.width) device pixels")
+        #expect(size.height == Int((cell.height * 2 * scale).rounded()), "height \(size.height) device pixels")
+    }
+
     @Test func theImageCacheIsBoundedByTheImageStore() {
         let cache = KittyPlaceholderImageCache()
         let state = KittyGraphicsState()

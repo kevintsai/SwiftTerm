@@ -1626,7 +1626,10 @@ extension TerminalView {
                 // with an image already resampled to the size it is shown at (see
                 // AppleKittyPlaceholderImages.swift for why per-cell draws of the source image were the
                 // cost of scrolling past an image).
-                let deviceScale = max(1, abs(context.ctm.a))
+                // From the full user → device transform, not `context.ctm`: in a window-hosted, layer-backed
+                // view AppKit keeps the backing scale in the context's base transform, so `ctm.a` reads 1
+                // on a 2x screen and the image would be resampled to half resolution (blurry)
+                let deviceScale = max(1, abs(context.convertToDeviceSpace(CGRect(x: 0, y: 0, width: 1, height: 1)).width))
                 let imageColorSpace = context.colorSpace ?? CGColorSpaceCreateDeviceRGB()
                 for run in KittyPlaceholderRun.group(lineInfo.kittyPlaceholders) {
                     guard let records = virtualPlacementsByImageId[run.imageId] else {
