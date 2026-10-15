@@ -12,6 +12,9 @@
 //  Off by default (it is a measurement, not an assertion about the machine it runs on):
 //      SWIFTTERM_KITTY_SCROLL_CORPUS=<recording.raw> swift test --filter KittyPlaceholderScrollBenchmark
 //  Optional: SWIFTTERM_KITTY_SCROLL_COLS / _ROWS (default 178×60, the size the recording was made at).
+//  SWIFTTERM_KITTY_SCROLL_WINDOW=1 draws the way an app does — the view inside an NSWindow, through its
+//  backing layer — instead of `cacheDisplay`. The two differ in how the device scale reaches the draw
+//  (see KittyPlaceholderRenderTests), so only the window path measures what fleetmux pays.
 //
 #if os(macOS)
 import AppKit
@@ -53,6 +56,12 @@ final class KittyPlaceholderScrollBenchmark: XCTestCase {
         guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             return XCTFail("no bitmap rep")
         }
+        let throughWindow = env["SWIFTTERM_KITTY_SCROLL_WINDOW"] != nil
+        var window: NSWindow?
+        if throughWindow {
+            window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window?.contentView = view
+        }
 
         var withImage: [Double] = []
         var withoutImage: [Double] = []
@@ -61,7 +70,12 @@ final class KittyPlaceholderScrollBenchmark: XCTestCase {
             view.terminal.feed(byteArray: frame)
             let placeholders = placeholderCells(view.terminal)
             let start = Date()
-            view.cacheDisplay(in: view.bounds, to: rep)
+            if throughWindow {
+                view.layer?.setNeedsDisplay()
+                view.layer?.displayIfNeeded()
+            } else {
+                view.cacheDisplay(in: view.bounds, to: rep)
+            }
             let ms = Date().timeIntervalSince(start) * 1000
             if placeholders > 0 {
                 withImage.append(ms)
@@ -75,8 +89,8 @@ final class KittyPlaceholderScrollBenchmark: XCTestCase {
             let s = xs.sorted()
             return s[s.count / 2]
         }
-        print(String(format: "KITTYSCROLL %dx%d  frames with image %d (up to %d placeholder cells): median %.1f ms  max %.1f ms  |  without image %d: median %.1f ms",
-                     cols, rows, withImage.count, maxCells, median(withImage), withImage.max() ?? .nan,
+        print(String(format: "KITTYSCROLL %@ %dx%d  frames with image %d (up to %d placeholder cells): median %.1f ms  max %.1f ms  |  without image %d: median %.1f ms",
+                     throughWindow ? "window@\(window?.backingScaleFactor ?? 0)x" : "cacheDisplay", cols, rows, withImage.count, maxCells, median(withImage), withImage.max() ?? .nan,
                      withoutImage.count, median(withoutImage)))
     }
 

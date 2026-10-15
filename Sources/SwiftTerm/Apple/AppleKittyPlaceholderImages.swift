@@ -71,9 +71,9 @@ final class KittyPlaceholderImageCache {
 
     var count: Int { entries.count }
 
-    /// Device pixels the cached copy of `imageId` was resampled to (nil = none yet)
-    func scaledPixelSize(imageId: UInt32) -> (width: Int, height: Int)? {
-        entries[imageId]?.scaled.map { ($0.width, $0.height) }
+    /// The resampled copy of `imageId` the view draws — one image pixel per device pixel (nil = none yet)
+    func scaledImage(imageId: UInt32) -> TTImage? {
+        entries[imageId]?.scaled?.image
     }
 
     private static func decode(_ payload: KittyGraphicsPayload) -> CGImage? {

@@ -147,28 +147,93 @@ final class KittyPlaceholderRenderTests {
         #expect(sawGreen, "the re-transmitted image is drawn")
     }
 
-    /// The image is resampled to the device pixels it is shown at when the view draws the way it does
-    /// in an app: inside a window, through its backing layer, at 2x. There AppKit keeps the device scale
-    /// in the context's base transform — `context.ctm` reads 1 while a point is 2 device pixels — so a
-    /// scale taken from the CTM resamples to half resolution and the screen blows it back up: the image
-    /// is blurry. `cacheDisplay` (the other tests) exposes the scale in the CTM and cannot see this.
-    @Test func anImageIsResampledToDevicePixelsWhenDrawnThroughAWindowLayer() throws {
+    /// A PNG of 1-pixel black / white stripes: vertical in the left half, horizontal in the right —
+    /// any resampling on the way (down and back up) turns either half grey
+    private func stripesPNG(width: Int, height: Int) -> Data {
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+        for x in stride(from: 0, to: width / 2, by: 2) { ctx.fill(CGRect(x: x, y: 0, width: 1, height: height)) }
+        for y in stride(from: 0, to: height, by: 2) { ctx.fill(CGRect(x: width / 2, y: y, width: width - width / 2, height: 1)) }
+        return NSBitmapImageRep(cgImage: ctx.makeImage()!).representation(using: .png, properties: [:])!
+    }
+
+    /// Share of neighbouring pixels that still alternate black / white (left half along a row, right
+    /// half down a column): 1 = sharp, ~0 = grey
+    private func stripeContrast(_ image: CGImage) -> Double {
+        let w = image.width, h = image.height
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
+        var sharp = 0, pairs = 0
+        for y in 0..<(h - 1) {
+            for x in 0..<(w / 2 - 1) {
+                pairs += 1
+                if abs(Int(px[y * w + x]) - Int(px[y * w + x + 1])) > 160 { sharp += 1 }
+            }
+            for x in (w / 2)..<w {
+                pairs += 1
+                if abs(Int(px[y * w + x]) - Int(px[(y + 1) * w + x])) > 160 { sharp += 1 }
+            }
+        }
+        return Double(sharp) / Double(pairs)
+    }
+
+    /// The image as the view draws it in an app: inside a window, through its backing layer, at 2x.
+    /// There AppKit keeps the device scale in the context's base transform — `context.ctm` reads 1
+    /// while a point is 2 device pixels — so a scale taken from the CTM resampled the image to half
+    /// resolution and the screen blew it back up: blurry. `cacheDisplay` (the other tests) exposes the
+    /// scale in the CTM and cannot see this. Returns the resampled copy the view blits, and the scale.
+    private func drawThroughWindowLayer(png: (CGSize) -> Data) throws -> (TTImage, CGFloat, CGSize) {
         let view = makeView()
         let window = NSWindow(contentRect: view.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         let scale = window.backingScaleFactor
         try #require(scale >= 2, "needs a 2x screen to mean anything (backingScaleFactor = \(scale))")
-        showImage(view, left: red, right: blue)
         let cell = view.cellDimension!
-
+        let points = CGSize(width: cell.width * 8, height: cell.height * 2)
+        view.terminal.feed(text: transmit(png(CGSize(width: points.width * scale, height: points.height * scale)), cols: 8, rows: 2))
+        view.terminal.feed(text: "\u{1b}[2;3H" + placeholderRow(0, cols: 8))
+        view.terminal.feed(text: "\u{1b}[3;3H" + placeholderRow(1, cols: 8))
         // The draw AppKit performs for a window-hosted, layer-backed view
         let layer = try #require(view.layer)
         layer.setNeedsDisplay()
         layer.displayIfNeeded()
+        let image = try #require(view.kittyPlaceholderImages.scaledImage(imageId: imageId), "the image was drawn")
+        return (image, scale, points)
+    }
 
-        let size = try #require(view.kittyPlaceholderImages.scaledPixelSize(imageId: imageId), "the image was drawn")
-        #expect(size.width == Int((cell.width * 8 * scale).rounded()), "width \(size.width) device pixels")
-        #expect(size.height == Int((cell.height * 2 * scale).rounded()), "height \(size.height) device pixels")
+    @Test func anImageIsResampledToDevicePixelsWhenDrawnThroughAWindowLayer() throws {
+        let (image, scale, points) = try drawThroughWindowLayer { size in
+            self.twoColourPNG(width: Int(size.width), height: Int(size.height), left: self.red, right: self.blue)
+        }
+        let cg = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        #expect(cg.width == Int((points.width * scale).rounded()), "width \(cg.width) device pixels")
+        #expect(cg.height == Int((points.height * scale).rounded()), "height \(cg.height) device pixels")
+    }
+
+    @Test func anImageWithOnePixelPerDevicePixelStaysSharpThroughAWindowLayer() throws {
+        let (image, _, _) = try drawThroughWindowLayer { size in
+            self.stripesPNG(width: Int(size.width), height: Int(size.height))
+        }
+        let cg = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let contrast = stripeContrast(cg)
+        #expect(contrast > 0.99, "\(Int(contrast * 100))% of neighbouring pixels keep the 1 px stripes")
+    }
+
+    @Test func resamplingToTheSourceSizeKeepsEveryPixel() {
+        // The cache's own resample, isolated from the view: at 1:1 it must be a copy
+        let cache = KittyPlaceholderImageCache()
+        let png = stripesPNG(width: 64, height: 32)
+        let stored = KittyGraphicsImage(payload: .png(png), byteSize: png.count, lastAccessTick: 1, revision: 1)
+        let image = cache.image(imageId: 1, stored: stored, pixelWidth: 64, pixelHeight: 32, size: CGSize(width: 32, height: 16),
+                                colorSpace: CGColorSpaceCreateDeviceRGB())
+        let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        #expect(cg.map { stripeContrast($0) } == 1.0)
     }
 
     @Test func theImageCacheIsBoundedByTheImageStore() {
