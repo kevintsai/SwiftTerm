@@ -1480,6 +1480,22 @@ extension Terminal {
         updateRange(startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
     }
 
+    /// What `ESC[2J` does to images: everything with a place on screen goes, virtual placements stay.
+    ///
+    /// A virtual placement is only a prototype for the placeholder cells that name it, so it has no
+    /// position to clear; kitty's own clear skips it the same way. The image it refers to stays with it.
+    func clearKittyImagesExceptVirtualPlacements() {
+        for idx in 0..<buffer.lines.count {
+            buffer.clearImagesFromLine(at: idx)
+        }
+        for idx in 0..<altBuffer.lines.count {
+            altBuffer.clearImagesFromLine(at: idx)
+        }
+        _ = removePlacementRecords { !$0.isVirtual }
+        cleanupUnusedKittyImages()
+        updateRange(startLine: buffer.scrollTop, endLine: buffer.scrollBottom)
+    }
+
     func clearKittyImages(in buffer: Buffer, isAlternateBuffer: Bool) {
         let removedKeys = removeKittyPlacements(in: buffer, lineRange: 0..<buffer.lines.count) { _ in true }
         let recordKeys = removePlacementRecords { record in

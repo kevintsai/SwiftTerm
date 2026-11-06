@@ -36,6 +36,63 @@ final class KittyGraphicsLifecycleTests {
         #expect(t.kittyGraphicsState.placementsByKey.isEmpty)
     }
 
+    /// A virtual placement has no place on screen, so clearing the screen does not touch it. tmux sends
+    /// `ESC[2J` when it wakes a suspended client and then repaints the placeholder cells; nothing re-sends
+    /// the image, so dropping it here loses the picture for good.
+    @Test func testEraseDisplayKeepsVirtualPlacementsAndTheirImages() {
+        let h = makeHeadlessTerminal()
+        let t = h.terminal!
+
+        sendKitty(terminal: t,
+                  control: "a=T,f=24,s=1,v=1,t=d,c=1,r=1,i=1,U=1",
+                  payload: [1, 2, 3])
+        t.feed(text: "\u{1b}[2J")
+
+        #expect(t.kittyGraphicsState.imagesById[1] != nil)
+        #expect(t.kittyGraphicsState.placementsByKey.values.contains { $0.imageId == 1 && $0.isVirtual })
+    }
+
+    /// A headless terminal has no view to build a real placement with, so a virtual one stands in for it.
+    private func markRealPlacements(of imageId: UInt32, in terminal: Terminal) {
+        for (key, record) in terminal.kittyGraphicsState.placementsByKey where record.imageId == imageId {
+            terminal.kittyGraphicsState.placementsByKey[key]?.isVirtual = false
+        }
+    }
+
+    @Test func testEraseDisplayClearsRealPlacementsAndTheirImages() {
+        let h = makeHeadlessTerminal()
+        let t = h.terminal!
+
+        sendKitty(terminal: t,
+                  control: "a=T,f=24,s=1,v=1,t=d,c=1,r=1,i=1,U=1",
+                  payload: [1, 2, 3])
+        markRealPlacements(of: 1, in: t)
+        #expect(!t.kittyGraphicsState.placementsByKey.isEmpty)
+
+        t.feed(text: "\u{1b}[2J")
+
+        #expect(t.kittyGraphicsState.imagesById.isEmpty)
+        #expect(t.kittyGraphicsState.placementsByKey.isEmpty)
+    }
+
+    @Test func testEraseDisplaySeparatesVirtualFromRealPlacements() {
+        let h = makeHeadlessTerminal()
+        let t = h.terminal!
+
+        sendKitty(terminal: t,
+                  control: "a=T,f=24,s=1,v=1,t=d,c=1,r=1,i=1,U=1",
+                  payload: [1, 2, 3])
+        sendKitty(terminal: t,
+                  control: "a=T,f=24,s=1,v=1,t=d,c=1,r=1,i=2,U=1",
+                  payload: [4, 5, 6])
+        markRealPlacements(of: 2, in: t)
+        t.feed(text: "\u{1b}[2J")
+
+        #expect(t.kittyGraphicsState.imagesById[1] != nil)
+        #expect(t.kittyGraphicsState.imagesById[2] == nil)
+        #expect(t.kittyGraphicsState.totalImageBytes == t.kittyGraphicsState.imagesById[1]?.byteSize)
+    }
+
     @Test func testKittyImagesClearedWhenEnteringAltBuffer() {
         let h = makeHeadlessTerminal()
         let t = h.terminal!

@@ -2466,7 +2466,7 @@ open class Terminal {
                 j -= 1
                 resetBufferLine (y: j, clearImages: true)
             }
-            clearAllKittyImages()
+            clearKittyImagesExceptVirtualPlacements()
             updateRange (0)
         case 3:
             // Clear scrollback (everything not in viewport)
