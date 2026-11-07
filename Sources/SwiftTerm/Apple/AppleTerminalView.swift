@@ -1985,18 +1985,29 @@ extension TerminalView {
         //caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(terminal.buffer.x)), y: lineOrigin.y)
         let buffer = terminal.displayBuffer
         let vy = buffer.yBase + buffer.y
-        
+
+        #if os(macOS)
+        // Visibility goes through the one definition and never changes the hierarchy (see
+        // `applyCaretVisibility`): this runs every frame, so a remove/re-add here would lay the window out
+        // every frame just as `hideCursor` used to.
+        if caretView.superview != self {
+            addSubview(caretView)
+        }
+        applyCaretVisibility()
+        if vy >= buffer.yDisp + buffer.rows {
+            notifyCursorTrail(visible: false)
+            return
+        }
+        #else
         if vy >= buffer.yDisp + buffer.rows {
             caretView.removeFromSuperview()
-            #if os(macOS)
-            notifyCursorTrail(visible: false)
-            #endif
             return
         } else if terminal.cursorHidden == false && caretView.superview != self {
             addSubview(caretView)
         } else if terminal.cursorHidden == true && caretView.superview == self {
             caretView.removeFromSuperview()
         }
+        #endif
         let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
         #if os(iOS) || os(visionOS)
         let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))
@@ -2013,7 +2024,9 @@ extension TerminalView {
         caretView.frame.size.width = cellDimension.width * doublePosition * CGFloat(cursorColumnWidth)
         caretView.setText (ch: charUnderCursor)
         #if os(macOS)
-        notifyCursorTrail(visible: caretView.superview == self)
+        // The cursor is on screen here; it is visible unless the program hid it. Not `!caretView.isHidden`:
+        // under Metal the caret view is hidden but the renderer still draws the cursor the trail follows.
+        notifyCursorTrail(visible: !terminal.cursorHidden)
         #endif
     }
     

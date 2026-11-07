@@ -662,7 +662,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             metalRenderer = nil
             metalBoundWindow = nil
             if let caretView = caretView {
-                caretView.isHidden = false
+                applyCaretVisibility(metalDrawsCursor: false)
                 caretView.updateCursorStyle()
             }
             needsDisplay = true
@@ -710,7 +710,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if let caretView = caretView {
             addSubview(newView, positioned: .below, relativeTo: caretView)
             caretView.disableAnimations()
-            caretView.isHidden = true
+            applyCaretVisibility(metalDrawsCursor: true)
         } else if let oldView = oldView {
             addSubview(newView, positioned: .above, relativeTo: oldView)
         } else {
@@ -790,7 +790,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         metalBoundWindow = nil
         useMetalRenderer = false
         if let caretView = caretView {
-            caretView.isHidden = false
+            applyCaretVisibility(metalDrawsCursor: false)
             caretView.updateCursorStyle()
         }
         needsDisplay = true
@@ -3112,6 +3112,26 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         return stripe
     }
     
+    /// Whether the CoreText caret is shown: not when the Metal renderer draws its own cursor, not while the
+    /// program has hidden it (`CSI ?25l`), and not when the cursor row is below the visible screen. The single
+    /// definition — every place that changes one of those inputs calls this. `metalDrawsCursor` is passed in
+    /// because the Metal switch calls it before `useMetalRenderer` flips.
+    ///
+    /// Visibility is a property of the caret, never a hierarchy change: programs that redraw in place hide and
+    /// show the cursor on every frame, and removing/re-adding the subview made the window lay out each time —
+    /// for a SwiftUI host, its whole window. See `CaretVisibilityLayoutTests`.
+    func applyCaretVisibility(metalDrawsCursor: Bool) {
+        guard let caretView, let terminal else { return }
+        let buffer = terminal.displayBuffer
+        let belowScreen = buffer.yBase + buffer.y >= buffer.yDisp + buffer.rows
+        caretView.isHidden = metalDrawsCursor || terminal.cursorHidden || belowScreen
+    }
+
+    /// `applyCaretVisibility(metalDrawsCursor:)` for the renderer currently in use.
+    func applyCaretVisibility() {
+        applyCaretVisibility(metalDrawsCursor: useMetalRenderer)
+    }
+
     open func showCursor(source: Terminal) {
         if useMetalRenderer {
             queueMetalDisplay()
@@ -3120,6 +3140,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if caretView.superview == nil {
             addSubview(caretView)
         }
+        applyCaretVisibility(metalDrawsCursor: false)
     }
 
     open func hideCursor(source: Terminal) {
@@ -3127,7 +3148,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             queueMetalDisplay()
             return
         }
-        caretView.removeFromSuperview()
+        applyCaretVisibility(metalDrawsCursor: false)
     }
     
     open func cursorStyleChanged (source: Terminal, newStyle: CursorStyle) {
