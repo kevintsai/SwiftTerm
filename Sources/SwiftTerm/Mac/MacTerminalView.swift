@@ -3119,12 +3119,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     ///
     /// Visibility is a property of the caret, never a hierarchy change: programs that redraw in place hide and
     /// show the cursor on every frame, and removing/re-adding the subview made the window lay out each time —
-    /// for a SwiftUI host, its whole window. See `CaretVisibilityLayoutTests`.
+    /// for a SwiftUI host, its whole window. And it is written only when it changes: every `isHidden` write
+    /// makes AppKit recompute tracking areas and cursor rects across the window's view tree.
+    /// See `CaretVisibilityLayoutTests`.
     func applyCaretVisibility(metalDrawsCursor: Bool) {
         guard let caretView, let terminal else { return }
         let buffer = terminal.displayBuffer
         let belowScreen = buffer.yBase + buffer.y >= buffer.yDisp + buffer.rows
-        caretView.isHidden = metalDrawsCursor || terminal.cursorHidden || belowScreen
+        let hidden = metalDrawsCursor || terminal.cursorHidden || belowScreen
+        // Not covered by a test: KVO reports no same-value write, so the test cannot tell this guard apart from
+        // AppKit skipping one on its own, and whether such a write still dirties tracking areas is not measured.
+        // Kept because it costs a comparison and this runs every frame.
+        if caretView.isHidden != hidden {
+            caretView.isHidden = hidden
+        }
     }
 
     /// `applyCaretVisibility(metalDrawsCursor:)` for the renderer currently in use.
@@ -3132,15 +3140,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         applyCaretVisibility(metalDrawsCursor: useMetalRenderer)
     }
 
+    // `CSI ?25l` / `?25h` do not touch the caret here: they ask for a display, and the display applies the
+    // visibility (`updateDisplay` → `updateCursorPosition` → `applyCaretVisibility`). A frame that hides the
+    // cursor while drawing and shows it at the end — the common shape, once per frame — then nets to no change.
+    // `updateDisplay` positions the caret even when no row changed, so a lone hide or show is not lost.
     open func showCursor(source: Terminal) {
         if useMetalRenderer {
             queueMetalDisplay()
             return
         }
-        if caretView.superview == nil {
-            addSubview(caretView)
-        }
-        applyCaretVisibility(metalDrawsCursor: false)
+        queuePendingDisplay()
     }
 
     open func hideCursor(source: Terminal) {
@@ -3148,7 +3157,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             queueMetalDisplay()
             return
         }
-        applyCaretVisibility(metalDrawsCursor: false)
+        queuePendingDisplay()
     }
     
     open func cursorStyleChanged (source: Terminal, newStyle: CursorStyle) {

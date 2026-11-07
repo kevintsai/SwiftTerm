@@ -84,7 +84,48 @@ struct CaretVisibilityLayoutTests {
         #expect(caret.isHidden)
 
         view.terminal.feed(text: "\u{1b}[?25h")
+        view.updateDisplay(notifyAccessibility: false)
         #expect(caret.superview === view)
+        #expect(!caret.isHidden)
+    }
+
+    /// A frame that hides the cursor and shows it again must not touch the caret at all. Toggling `isHidden`
+    /// makes AppKit recompute tracking areas and cursor rects by walking the window's view tree — for a
+    /// SwiftUI host, in fleetmux, ~10x the tracking-area work of the remove/re-add it replaced. The pair
+    /// cancels out within the frame, so visibility is applied when the frame is displayed, and only on change.
+    @Test func aFrameThatHidesAndShowsTheCursorLeavesTheCaretAlone() {
+        let (window, _, view) = makeHierarchy()
+        defer { window.close() }
+        guard let caret = view.caretView else { Issue.record("no caret view"); return }
+        var writes = 0
+        let observation = caret.observe(\.isHidden, options: [.new]) { _, _ in writes += 1 }
+        defer { observation.invalidate() }
+
+        for _ in 0..<5 {
+            // Claude Code's frame shape: synchronized, cursor hidden while drawing, shown at the end.
+            view.terminal.feed(text: "\u{1b}[?2026h\u{1b}[?25l\u{1b}[5;1Hspinner\u{1b}[2;3H\u{1b}[?25h\u{1b}[?2026l")
+            view.updateDisplay(notifyAccessibility: false)
+        }
+        // Without synchronized output too: the pair lands inside one display batch.
+        view.terminal.feed(text: "\u{1b}[?25l\u{1b}[6;1Hplain\u{1b}[2;3H\u{1b}[?25h")
+        view.updateDisplay(notifyAccessibility: false)
+
+        #expect(writes == 0)
+        #expect(!caret.isHidden)
+    }
+
+    /// The other half: a cursor the program leaves hidden is hidden once the frame is displayed.
+    @Test func aCursorLeftHiddenIsHiddenOnDisplay() {
+        let (window, _, view) = makeHierarchy()
+        defer { window.close() }
+        guard let caret = view.caretView else { Issue.record("no caret view"); return }
+
+        view.terminal.feed(text: "\u{1b}[?25l")
+        view.updateDisplay(notifyAccessibility: false)
+        #expect(caret.isHidden)
+
+        view.terminal.feed(text: "\u{1b}[?25h")
+        view.updateDisplay(notifyAccessibility: false)
         #expect(!caret.isHidden)
     }
 
