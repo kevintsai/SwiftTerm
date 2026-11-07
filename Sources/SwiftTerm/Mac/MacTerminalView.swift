@@ -1279,6 +1279,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
 
     open override func setFrameSize(_ newSize: NSSize) {
+        // A layout pass re-applies the frame the view already has — and a layout pass is what every caret
+        // remove/re-add (`CSI ?25l … ?25h`, once per frame for a spinner) asks the window for. Treating that as
+        // a resize repainted every row each frame and defeated the narrowed invalidation. Nothing about the
+        // grid or the pixels changes when the size does not. See `SameFrameSizeRepaintTests`.
+        if newSize == frame.size {
+            super.setFrameSize(newSize)
+            return
+        }
         super.setFrameSize(newSize)
         updateScrollerFrame()
         updateProgressBarFrame()
